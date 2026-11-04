@@ -2,7 +2,5 @@ parameters:
     level: max
     paths:
         - src
-        - tests
-    excludePaths:
-        - tests/Upstream/*
-        - tests/Smoke/*
+        - tests/Unit
+        - tests/Functional
