@@ -3,6 +3,6 @@
 /.phpunit.cache/
 /.phpcs-cache
 /.idea/
-/tests/Upstream/checkouts/
+/.upstream/
 /tests/Smoke/symfony-app/vendor/
 /tests/Smoke/symfony-app/var/

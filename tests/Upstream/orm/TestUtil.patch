@@ -1,0 +1,60 @@
+diff --git a/tests/Tests/OrmFunctionalTestCase.php b/tests/Tests/OrmFunctionalTestCase.php
+index bc0365f..806617b 100644
+--- a/tests/Tests/OrmFunctionalTestCase.php
++++ b/tests/Tests/OrmFunctionalTestCase.php
+@@ -170,6 +170,7 @@ use Doctrine\Tests\Models\VersionedManyToOne\Article;
+ use Doctrine\Tests\Models\VersionedManyToOne\Category;
+ use Exception;
+ use PHPUnit\Framework\AssertionFailedError;
++use PHPUnit\Framework\Attributes\Before;
+ use PHPUnit\Framework\Constraint\Count;
+ use Psr\Cache\CacheItemPoolInterface;
+ use RuntimeException;
+@@ -835,6 +836,16 @@ abstract class OrmFunctionalTestCase extends OrmTestCase
+         }
+     }
+
++    /**
++     * DuckDB: runs before setUp(), so SkipListExtension can skip a listed test
++     * before setUp() creates its model set. A failed schema creation still
++     * marks the model set as created and would break later tests using it.
++     */
++    #[Before(priority: 100)]
++    final protected function beforeSetUpForDuckDBSkipList(): void
++    {
++    }
++
+     /**
+      * Creates a connection to the test database, if there is none yet, and
+      * creates the necessary tables.
+diff --git a/tests/Tests/TestUtil.php b/tests/Tests/TestUtil.php
+index 918fcde..85b7bcd 100644
+--- a/tests/Tests/TestUtil.php
++++ b/tests/Tests/TestUtil.php
+@@ -12,6 +12,7 @@ use Doctrine\DBAL\DriverManager;
+ use Doctrine\DBAL\Exception\DatabaseObjectNotFoundException;
+ use Doctrine\DBAL\Platforms\SQLitePlatform;
+ use Doctrine\ORM\Configuration;
++use MartinJuul\DBAL\DuckDB\Setup\DuckDBSetup;
+ use UnexpectedValueException;
+
+ use function assert;
+@@ -91,6 +92,10 @@ class TestUtil
+
+     public static function configureProxies(Configuration $configuration): void
+     {
++        // DuckDB: every ORM configuration of the suite passes through here,
++        // so this applies the package's ORM setup (types, sequence identity).
++        DuckDBSetup::configureOrm($configuration);
++
+         $enableNativeLazyObjects = getenv('ENABLE_NATIVE_LAZY_OBJECTS');
+
+         if ($enableNativeLazyObjects === false) {
+@@ -201,6 +206,7 @@ class TestUtil
+         foreach (
+             [
+                 'driver',
++                'driverClass',
+                 'user',
+                 'password',
+                 'host',

@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Runs Doctrine ORM's own test suite against the DuckDB driver. run.php copies
+    this file into the patched ORM checkout, so paths are relative to the
+    checkout root. db_driver is a placeholder: TestUtil.patch passes
+    db_driverClass through, and DriverManager instantiates it. ORM's TestUtil
+    drops and recreates db_dbname through a privileged connection without a
+    file, which the package's schema manager supports (R30).
+-->
+<phpunit xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:noNamespaceSchemaLocation="vendor/phpunit/phpunit/phpunit.xsd"
+         colors="true"
+         beStrictAboutOutputDuringTests="true"
+         displayDetailsOnTestsThatTriggerDeprecations="true"
+         displayDetailsOnTestsThatTriggerNotices="true"
+         displayDetailsOnTestsThatTriggerWarnings="true"
+         failOnNotice="true"
+         failOnWarning="true"
+         failOnRisky="true"
+         bootstrap="./tests/Tests/TestInit.php"
+         cacheDirectory=".phpunit.cache"
+>
+    <testsuites>
+        <testsuite name="Doctrine ORM Test Suite">
+            <directory>./tests/Tests/ORM</directory>
+        </testsuite>
+    </testsuites>
+
+    <groups>
+        <exclude>
+            <group>performance</group>
+            <group>locking_functional</group>
+        </exclude>
+    </groups>
+
+    <php>
+        <ini name="error_reporting" value="-1"/>
+        <ini name="memory_limit" value="-1"/>
+
+        <var name="db_driver" value="duckdb"/>
+        <var name="db_driverClass" value="MartinJuul\DBAL\DuckDB\Driver"/>
+        <var name="db_dbname" value="orm-tests.duckdb"/>
+
+        <env name="COLUMNS" value="120"/>
+        <env name="DOCTRINE_DEPRECATIONS" value="trigger"/>
+    </php>
+
+    <extensions>
+        <bootstrap class="MartinJuul\DBAL\DuckDB\Tests\Upstream\SkipListExtension">
+            <parameter name="suite" value="orm"/>
+        </bootstrap>
+    </extensions>
+
+    <source ignoreSuppressionOfDeprecations="true">
+        <include>
+            <directory>src</directory>
+        </include>
+    </source>
+</phpunit>

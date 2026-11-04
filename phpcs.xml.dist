@@ -10,7 +10,6 @@
     <file>src</file>
     <file>tests</file>
     <exclude-pattern>tests/Smoke/symfony-app/var/*</exclude-pattern>
-    <exclude-pattern>tests/Upstream/checkouts/*</exclude-pattern>
     <exclude-pattern>tests/Smoke/symfony-app/vendor/*</exclude-pattern>
     <exclude-pattern>tests/Smoke/symfony-app/config/reference.php</exclude-pattern>
 

@@ -51,6 +51,14 @@
         "test": "phpunit",
         "phpstan": "phpstan analyse --memory-limit=1G",
         "cs": "phpcs",
-        "test:smoke": "bash tests/Smoke/run.sh"
+        "test:smoke": "bash tests/Smoke/run.sh",
+        "test:upstream-dbal": [
+            "Composer\\Config::disableProcessTimeout",
+            "php tests/Upstream/run.php dbal"
+        ],
+        "test:upstream-orm": [
+            "Composer\\Config::disableProcessTimeout",
+            "php tests/Upstream/run.php orm"
+        ]
     }
 }

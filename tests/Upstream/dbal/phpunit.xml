@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Runs Doctrine DBAL's own test suite against the DuckDB driver. run.php copies
+    this file into the DBAL checkout, so paths are relative to the checkout root.
+    db_driver is a placeholder: DBAL's TestUtil requires a driver name, while
+    DriverManager instantiates db_driverClass when it is set.
+-->
+<phpunit xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:noNamespaceSchemaLocation="vendor/phpunit/phpunit/phpunit.xsd"
+         colors="true"
+         beStrictAboutOutputDuringTests="true"
+         failOnRisky="true"
+         failOnWarning="true"
+         failOnNotice="true"
+         failOnPhpunitDeprecation="true"
+         displayDetailsOnTestsThatTriggerErrors="true"
+         displayDetailsOnTestsThatTriggerDeprecations="true"
+         cacheDirectory=".phpunit.cache"
+>
+    <php>
+        <ini name="error_reporting" value="-1"/>
+        <ini name="memory_limit" value="-1"/>
+
+        <var name="db_driver" value="duckdb"/>
+        <var name="db_driverClass" value="MartinJuul\DBAL\DuckDB\Driver"/>
+        <var name="db_memory" value="true"/>
+
+        <env name="DOCTRINE_DEPRECATIONS" value="trigger"/>
+    </php>
+
+    <testsuites>
+        <testsuite name="Doctrine DBAL Test Suite">
+            <directory>tests</directory>
+        </testsuite>
+    </testsuites>
+
+    <extensions>
+        <bootstrap class="MartinJuul\DBAL\DuckDB\Tests\Upstream\SkipListExtension">
+            <parameter name="suite" value="dbal"/>
+        </bootstrap>
+    </extensions>
+
+    <source>
+        <include>
+            <directory>src</directory>
+        </include>
+    </source>
+</phpunit>

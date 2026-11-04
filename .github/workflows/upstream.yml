@@ -1,0 +1,59 @@
+name: Upstream suites
+
+# Runs Doctrine's own DBAL and ORM test suites against the driver (R21). DBAL
+# 4.5.0 and ORM 3.7.6 gate; the DBAL 4.6.x-dev variant reports without gating
+# (R23). Each run fails on a test failure outside tests/Upstream/skiplist.php
+# and on a skip-list entry that names no test, and warns about entries whose
+# tests pass again.
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+concurrency:
+  group: upstream-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  upstream:
+    name: ${{ matrix.suite }} suite / DBAL ${{ matrix.dbal }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    continue-on-error: ${{ matrix.experimental }}
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [dbal, orm]
+        dbal: ['4.5.0']
+        experimental: [false]
+        include:
+          - suite: dbal
+            dbal: '4.6.x'
+            experimental: true
+          - suite: orm
+            dbal: '4.6.x'
+            experimental: true
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.5'
+          tools: composer
+          coverage: none
+
+      - name: Build ext-duckdb from the 2.0.0 tag
+        uses: ./.github/actions/ext-duckdb
+
+      - name: Cache Composer downloads
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/composer/files
+          key: composer-upstream-${{ matrix.suite }}-${{ matrix.dbal }}-${{ hashFiles('composer.json', 'tests/Upstream/run.php') }}
+          restore-keys: composer-upstream-${{ matrix.suite }}-${{ matrix.dbal }}-
+
+      - name: Run the ${{ matrix.suite }} suite
+        run: php tests/Upstream/run.php ${{ matrix.suite }} --dbal=${{ matrix.dbal }}
