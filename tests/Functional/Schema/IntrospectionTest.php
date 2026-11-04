@@ -210,7 +210,7 @@ final class IntrospectionTest extends FunctionalTestCase
             'big' => 'BIGNUM',
         ];
 
-        // Nested and wide types get their own DBAL types in a later unit; until then they must round-trip as well.
+        // Nested and wide types have their own DBAL types (see tests/Functional/Types); they must round-trip here too.
         $nestedColumns = [
             'l' => 'INTEGER[]',
             'a' => 'INTEGER[3]',
