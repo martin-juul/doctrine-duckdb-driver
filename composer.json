@@ -1,0 +1,55 @@
+{
+    "name": "martin-juul/dbal-duckdb",
+    "description": "Doctrine DBAL driver and platform for DuckDB through the native ext-duckdb extension",
+    "type": "library",
+    "license": "MIT",
+    "keywords": ["duckdb", "doctrine", "dbal", "orm", "driver", "analytics"],
+    "authors": [
+        {
+            "name": "Martin Juul Christiansen",
+            "email": "code@juul.xyz",
+            "homepage": "https://juul.xyz"
+        }
+    ],
+    "require": {
+        "php": "^8.4",
+        "ext-duckdb": "^2.0",
+        "doctrine/dbal": "^4.5"
+    },
+    "require-dev": {
+        "doctrine/coding-standard": "^14.0",
+        "doctrine/doctrine-bundle": "^3.3",
+        "doctrine/doctrine-migrations-bundle": "^3.4",
+        "doctrine/migrations": "^3.9",
+        "doctrine/orm": "^3.7",
+        "phpstan/phpstan": "^2.1",
+        "phpunit/phpunit": "^12.4",
+        "symfony/framework-bundle": "^7.3",
+        "symfony/yaml": "^7.3"
+    },
+    "suggest": {
+        "doctrine/orm": "Map entities to DuckDB tables (^3.7)",
+        "doctrine/doctrine-bundle": "Use the bundled Symfony integration (^3.3)"
+    },
+    "autoload": {
+        "psr-4": {
+            "MartinJuul\\DBAL\\DuckDB\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "MartinJuul\\DBAL\\DuckDB\\Tests\\": "tests/"
+        }
+    },
+    "config": {
+        "sort-packages": true,
+        "allow-plugins": {
+            "dealerdirect/phpcodesniffer-composer-installer": true
+        }
+    },
+    "scripts": {
+        "test": "phpunit",
+        "phpstan": "phpstan analyse --memory-limit=1G",
+        "cs": "phpcs"
+    }
+}

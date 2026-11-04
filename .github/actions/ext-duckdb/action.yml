@@ -1,0 +1,73 @@
+name: ext-duckdb from the 2.0.0 tag
+description: Build the patched DuckDB SDK and the ext-duckdb extension from the php-duckdb 2.0.0 tag, then enable the extension
+inputs:
+  ref:
+    description: php-duckdb git ref to build
+    required: false
+    default: '2.0.0'
+runs:
+  using: composite
+  steps:
+    - name: Check out php-duckdb
+      uses: actions/checkout@v4
+      with:
+        repository: martin-juul/php-duckdb
+        ref: ${{ inputs.ref }}
+        path: .ext-duckdb-src
+
+    - name: Install SDK build tools
+      shell: bash
+      run: |
+        set -euo pipefail
+        sudo apt-get update
+        sudo apt-get install -y build-essential cmake python3 curl patch ca-certificates
+        sudo mkdir -p /opt/duckdb
+        sudo chown "$(id -u):$(id -g)" /opt/duckdb
+
+    - name: Compute SDK build fingerprint
+      id: fingerprint
+      shell: bash
+      working-directory: .ext-duckdb-src
+      run: |
+        set -euo pipefail
+        fingerprint=$(bash packaging/duckdb/build-sdk.sh --fingerprint)
+        if [[ ! "$fingerprint" =~ ^[a-f0-9]{64}$ ]]; then
+          echo "Invalid DuckDB SDK build fingerprint" >&2
+          exit 1
+        fi
+        echo "key=duckdb-patched-v2-${RUNNER_OS}-${RUNNER_ARCH}-$fingerprint" >> "$GITHUB_OUTPUT"
+
+    - name: Restore SDK cache
+      id: cache
+      uses: actions/cache/restore@v4
+      with:
+        path: /opt/duckdb
+        key: ${{ steps.fingerprint.outputs.key }}
+
+    - name: Build or verify SDK
+      shell: bash
+      working-directory: .ext-duckdb-src
+      run: |
+        bash packaging/duckdb/build-sdk.sh \
+          --prefix /opt/duckdb --work-dir "${RUNNER_TEMP}/duckdb-sdk-build"
+
+    - name: Save SDK cache
+      if: steps.cache.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v4
+      with:
+        path: /opt/duckdb
+        key: ${{ steps.fingerprint.outputs.key }}
+
+    - name: Build and enable the extension
+      shell: bash
+      working-directory: .ext-duckdb-src
+      run: |
+        set -euo pipefail
+        phpize
+        ./configure --with-duckdb=/opt/duckdb
+        make -j"$(nproc)"
+        sudo make install
+        ini_dir="$(php --ini | sed -n 's/^Scan for additional .ini files in: //p')"
+        echo 'extension=duckdb' | sudo tee "$ini_dir/99-duckdb.ini" > /dev/null
+        echo "LD_LIBRARY_PATH=/opt/duckdb/lib" >> "$GITHUB_ENV"
+        LD_LIBRARY_PATH=/opt/duckdb/lib php -r 'echo "ext-duckdb ", phpversion("duckdb"), " on DuckDB ", DuckDB\version(), PHP_EOL;'

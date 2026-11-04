@@ -1,0 +1,8 @@
+/vendor/
+/composer.lock
+/.phpunit.cache/
+/.phpcs-cache
+/.idea/
+/tests/Upstream/checkouts/
+/tests/Smoke/symfony-app/vendor/
+/tests/Smoke/symfony-app/var/
