@@ -805,11 +805,14 @@ final readonly class DuckDBMetadataProvider implements MetadataProvider
     {
         $owned = $this->fetchOwnedSequenceKeys();
 
+        // DuckDB writes a sequence back with start_value set to its next counter
+        // value, so after a reopen start_value drifts. The platform declares
+        // MINVALUE equal to START WITH, and min_value does not drift.
         $sql = <<<'SQL'
             SELECT q.schema_name,
                    q.sequence_name,
                    q.increment_by,
-                   q.start_value
+                   q.min_value
             FROM duckdb_sequences() q
             JOIN duckdb_schemas() s ON s.oid = q.schema_oid
             WHERE q.database_name = current_database()
