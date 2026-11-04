@@ -40,6 +40,7 @@ use MartinJuul\DBAL\DuckDB\Types\StructType;
 use UnexpectedValueException;
 
 use function array_map;
+use function count;
 use function crc32;
 use function dechex;
 use function get_debug_type;
@@ -51,6 +52,7 @@ use function is_string;
 use function preg_match;
 use function sort;
 use function sprintf;
+use function str_contains;
 use function str_replace;
 use function str_starts_with;
 use function strcasecmp;
@@ -439,11 +441,13 @@ final readonly class DuckDBMetadataProvider implements MetadataProvider
     public function fetchColumns(string|null $schemaName, string|null $tableName): array
     {
         $columns = [];
+        $bounds  = $this->fetchBounds($schemaName, $tableName);
 
         foreach ($this->selectColumns($schemaName, $tableName)->iterateNumeric() as $row) {
             [$schema, $table, $name, $dataType, $nullable, $default, $comment] = $row;
 
             $schema = self::nonEmptyString($schema);
+            $bound  = $bounds[self::objectKey($schema, self::nonEmptyString($table)) . "\0" . self::nonEmptyString($name)] ?? [];
 
             $columns[] = [
                 'schema' => $schema,
@@ -455,11 +459,79 @@ final readonly class DuckDBMetadataProvider implements MetadataProvider
                     is_string($default) ? $default : null,
                     is_string($comment) ? $comment : null,
                     $schema,
+                    $bound['min'] ?? null,
+                    $bound['max'] ?? null,
                 ),
             ];
         }
 
         return $columns;
+    }
+
+    /**
+     * Reads the single-column CHECK constraints `(col >= n)` and `(col <= n)`,
+     * which DBAL declares for a column's minimum and maximum value. Any other
+     * CHECK is ignored.
+     *
+     * @return array<string, array{min?: int|float, max?: int|float}> By schema, table and column.
+     *
+     * @throws Exception
+     */
+    private function fetchBounds(string|null $schemaName, string|null $tableName): array
+    {
+        $params = [];
+        $where  = $this->buildTablePredicate($schemaName, $tableName, $params);
+
+        $sql = <<<SQL
+            SELECT c.schema_name,
+                   c.table_name,
+                   c.expression,
+                   c.constraint_column_names
+            FROM duckdb_constraints() c
+            JOIN duckdb_tables() t ON t.table_oid = c.table_oid
+            JOIN duckdb_schemas() s ON s.oid = t.schema_oid
+            WHERE {$where}
+              AND c.constraint_type = 'CHECK'
+            ORDER BY c.schema_name,
+                     c.table_name,
+                     c.constraint_index
+            SQL;
+
+        $bounds = [];
+
+        foreach ($this->connection->executeQuery($sql, $params)->iterateNumeric() as $row) {
+            [$schema, $table, $expression, $columns] = $row;
+
+            $columns = self::nameList($columns);
+
+            if (count($columns) !== 1 || ! is_string($expression)) {
+                continue;
+            }
+
+            if (
+                preg_match(
+                    '/^\((?:"((?:[^"]|"")+)"|([^\s()"]+)) (>=|<=) (-?\d+(?:\.\d+)?)\)$/',
+                    $expression,
+                    $matches,
+                ) !== 1
+            ) {
+                continue;
+            }
+
+            $column = $matches[1] !== '' ? str_replace('""', '"', $matches[1]) : $matches[2];
+
+            if (strcasecmp($column, $columns[0]) !== 0) {
+                continue;
+            }
+
+            $literal = $matches[4];
+            $value   = str_contains($literal, '.') ? (float) $literal : (int) $literal;
+            $key     = self::objectKey(self::nonEmptyString($schema), self::nonEmptyString($table)) . "\0" . $columns[0];
+
+            $bounds[$key][$matches[3] === '>=' ? 'min' : 'max'] = $value;
+        }
+
+        return $bounds;
     }
 
     /**
@@ -785,6 +857,8 @@ final readonly class DuckDBMetadataProvider implements MetadataProvider
      * @param non-empty-string  $name
      * @param non-empty-string  $dataType
      * @param ?non-empty-string $schemaName The schema of the column's table.
+     * @param int|float|null    $minimum    The bound of a `col >= n` CHECK, kept as the `min` platform option.
+     * @param int|float|null    $maximum    The bound of a `col <= n` CHECK, kept as the `max` platform option.
      */
     public function createColumn(
         string $name,
@@ -793,6 +867,8 @@ final readonly class DuckDBMetadataProvider implements MetadataProvider
         string|null $default,
         string|null $comment,
         string|null $schemaName = null,
+        int|float|null $minimum = null,
+        int|float|null $maximum = null,
     ): Column {
         $parsed   = TypeStringParser::parse($dataType);
         $typeName = NativeType::NAME;
@@ -824,6 +900,14 @@ final readonly class DuckDBMetadataProvider implements MetadataProvider
 
         if ($comment !== null && $comment !== '') {
             $options['comment'] = $comment;
+        }
+
+        if ($minimum !== null) {
+            $platformOptions['min'] = $minimum;
+        }
+
+        if ($maximum !== null) {
+            $platformOptions['max'] = $maximum;
         }
 
         if (str_starts_with($typeName, 'duckdb_')) {

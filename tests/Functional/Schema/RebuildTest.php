@@ -395,7 +395,7 @@ final class RebuildTest extends FunctionalTestCase
             RebuildChecks::constraints($this->connection, 'checked'),
         );
 
-        $sql = $this->applyGenerated($this->diff(new Schema([self::checked(withMinimum: false)]), new Schema([$declared])));
+        $sql = $this->applyGenerated($this->diff(new Schema([self::checked(withMinimum: false)])));
 
         self::assertContains(StatementClassifier::REBUILD_BEGIN, $sql);
 
@@ -409,7 +409,8 @@ final class RebuildTest extends FunctionalTestCase
                 'NOT NULL',
                 'NOT NULL',
                 'id DEFAULT '
-                . "nextval('\"checked_id" . DuckDBPlatform::OWNED_SEQUENCE_SUFFIX . "\"')",
+                // The rebuild reuses the introspected default, which names the sequence with its schema.
+                . "nextval('\"main\".\"checked_id" . DuckDBPlatform::OWNED_SEQUENCE_SUFFIX . "\"')",
                 'price DEFAULT 5',
             ],
             RebuildChecks::constraints($this->connection, 'checked'),
