@@ -29,11 +29,18 @@ use function array_reverse;
 use function count;
 use function implode;
 use function is_numeric;
+use function preg_match_all;
+use function rtrim;
 use function sprintf;
+use function str_replace;
 use function str_starts_with;
 use function strlen;
 use function strpos;
+use function strtolower;
 use function substr;
+
+use const PREG_SET_ORDER;
+use const PREG_UNMATCHED_AS_NULL;
 
 /**
  * Produces the statements that apply a schema diff, rebuilding the tables
@@ -51,7 +58,13 @@ use function substr;
  *    tables, so that IDs continue;
  * 4. copies the rows back, parents first, from each old column to its new
  *    column, never by position;
- * 5. drops the staging tables, then recreates indexes and comments.
+ * 5. drops the staging tables, then recreates indexes and comments, and the
+ *    indexes on expressions that the rebuild entries carry.
+ *
+ * An index on expressions that uses a column the rebuild renames or drops is
+ * not recreated. Instead, the rebuild begins with a check that fails, naming
+ * the index, while the index exists, so a migration can drop it before the
+ * change and create it again afterwards.
  *
  * DuckDB checks a foreign key against the state before each statement, so a
  * self-referencing table is copied one tree level per statement until none
@@ -65,6 +78,7 @@ use function substr;
  *
  * @internal
  *
+ * @phpstan-import-type ExpressionIndex from RebuildPlan
  * @phpstan-import-type Rebuild from RebuildPlan
  * @phpstan-type Step array{sql: string, levels: array{table: string, depth: string}|null}
  */
@@ -95,14 +109,23 @@ final class TableRebuilder
 
     /**
      * The steps of a schema diff, routed by the plan the comparator
-     * registered for it, or table by table when there is none.
+     * registered for it, or table by table when there is none; then a
+     * connection, when given, supplies the indexes on expressions.
      *
      * @return list<Step>
+     *
+     * @throws Exception
      */
-    public function schemaDiffSteps(SchemaDiff $diff): array
+    public function schemaDiffSteps(SchemaDiff $diff, Connection|null $connection = null): array
     {
-        $plan = $this->platform->getRebuildPlan($diff)
-            ?? (new AlterRouting($this->platform))->plan($diff->getAlteredTables());
+        $plan = $this->platform->getRebuildPlan($diff);
+
+        if ($plan === null) {
+            $plan = $this->withExpressionIndexes(
+                (new AlterRouting($this->platform))->plan($diff->getAlteredTables()),
+                $connection,
+            );
+        }
 
         $steps = [];
 
@@ -143,13 +166,16 @@ final class TableRebuilder
 
     /**
      * The steps of a single table diff, without the context of a comparison:
-     * a rebuild covers only this table.
+     * a rebuild covers only this table, and keeps its indexes on expressions
+     * only when a connection is given to read them.
      *
      * @return list<Step>
+     *
+     * @throws Exception
      */
-    public function tableDiffSteps(TableDiff $diff): array
+    public function tableDiffSteps(TableDiff $diff, Connection|null $connection = null): array
     {
-        $plan  = (new AlterRouting($this->platform))->plan([$diff]);
+        $plan  = $this->withExpressionIndexes((new AlterRouting($this->platform))->plan([$diff]), $connection);
         $steps = [];
 
         foreach ($plan->nativeSQL as $statements) {
@@ -258,6 +284,19 @@ final class TableRebuilder
         return $sql;
     }
 
+    /** @throws Exception */
+    private function withExpressionIndexes(RebuildPlan $plan, Connection|null $connection): RebuildPlan
+    {
+        if ($connection === null) {
+            return $plan;
+        }
+
+        return new RebuildPlan(
+            $plan->nativeSQL,
+            DuckDBComparator::withExpressionIndexes($connection, $this->platform, $plan->rebuilds),
+        );
+    }
+
     /**
      * @param list<Step>             $steps
      * @param array<string, Rebuild> $rebuilds
@@ -290,6 +329,21 @@ final class TableRebuilder
         $reused   = [];
         $orphaned = [];
         $new      = [];
+        $recreate = [];
+
+        foreach ($rebuilds as $key => $rebuild) {
+            foreach ($rebuild['expressionIndexes'] as $index) {
+                $column = self::lostColumn($rebuild, $index['sql']);
+
+                if ($column === null) {
+                    $recreate[$key][] = $index;
+
+                    continue;
+                }
+
+                $steps[] = $this->lostColumnCheck($rebuild['old'], $index, $column);
+            }
+        }
 
         foreach ($rebuilds as $key => $rebuild) {
             [$new[$key], $tableReused, $tableOrphaned] = $this->keepOwnedSequences($rebuild);
@@ -402,6 +456,18 @@ final class TableRebuilder
         }
 
         $steps = array_merge($steps, $deferred);
+
+        foreach ($order as $key) {
+            foreach ($recreate[$key] ?? [] as $index) {
+                $steps[] = self::step(sprintf(
+                    'CREATE %sINDEX %s ON %s%s',
+                    $index['unique'] ? 'UNIQUE ' : '',
+                    Identifier::quoted($index['name'])->toSQL($this->platform),
+                    $new[$key]->getObjectName()->toSQL($this->platform),
+                    self::indexedExpressions($index['sql']),
+                ));
+            }
+        }
 
         foreach (array_keys($orphaned) as $sequence) {
             $steps[] = self::step('DROP SEQUENCE IF EXISTS ' . $sequence);
@@ -629,6 +695,133 @@ final class TableRebuilder
         }
 
         return $byNew[$key];
+    }
+
+    /**
+     * The first column of the old table that the index's expressions use and
+     * that the new table does not keep under the same name, or null.
+     *
+     * An identifier that is not followed by a parenthesis, outside string
+     * literals, is taken to name a column.
+     *
+     * @param Rebuild $rebuild
+     */
+    private static function lostColumn(array $rebuild, string $sql): string|null
+    {
+        $kept = [];
+
+        foreach ($rebuild['columns'] as [$oldColumn, $newColumn]) {
+            if (RebuildPlan::columnKey($oldColumn) !== RebuildPlan::columnKey($newColumn)) {
+                continue;
+            }
+
+            $kept[RebuildPlan::columnKey($oldColumn)] = true;
+        }
+
+        $oldColumns = [];
+
+        foreach ($rebuild['old']->getColumns() as $column) {
+            $oldColumns[RebuildPlan::columnKey($column)] = $column->getObjectName()->getIdentifier()->getValue();
+        }
+
+        preg_match_all(
+            '/\'(?:[^\']|\'\')*\'|"((?:[^"]|"")+)"|(?<![A-Za-z0-9_$])([A-Za-z_][A-Za-z0-9_$]*+)(?!\s*\()/',
+            self::indexedExpressions($sql),
+            $matches,
+            PREG_SET_ORDER | PREG_UNMATCHED_AS_NULL,
+        );
+
+        foreach ($matches as $match) {
+            $name = $match[1] ?? null;
+            $name = $name === null ? $match[2] ?? null : str_replace('""', '"', $name);
+
+            if ($name === null) {
+                continue;
+            }
+
+            $key = strtolower($name);
+
+            if (! isset($oldColumns[$key]) || isset($kept[$key])) {
+                continue;
+            }
+
+            return $oldColumns[$key];
+        }
+
+        return null;
+    }
+
+    /**
+     * A check that fails, naming the index, while the index exists.
+     *
+     * @param ExpressionIndex $index
+     *
+     * @return Step
+     */
+    private function lostColumnCheck(Table $old, array $index, string $column): array
+    {
+        return self::step(sprintf(
+            'SELECT CASE WHEN EXISTS (SELECT 1 FROM duckdb_indexes() WHERE database_name = current_database() '
+                . 'AND schema_name = %s AND table_name = %s AND index_name = %s) THEN error(%s) END',
+            $this->platform->quoteStringLiteral($index['schema']),
+            $this->platform->quoteStringLiteral($index['table']),
+            $this->platform->quoteStringLiteral($index['name']),
+            $this->platform->quoteStringLiteral(sprintf(
+                'Cannot rebuild table %s: its expression index %s uses column %s, which this change renames or '
+                    . 'drops. Drop the index before this change and create it again afterwards, in the same '
+                    . 'migration.',
+                $old->getObjectName()->toString(),
+                $index['name'],
+                $column,
+            )),
+        ));
+    }
+
+    /**
+     * The parenthesized expression list of a CREATE INDEX statement as
+     * DuckDB's catalog reports it: `CREATE INDEX name ON table(expressions);`.
+     */
+    private static function indexedExpressions(string $sql): string
+    {
+        $sql   = rtrim(rtrim($sql), ';');
+        $depth = 0;
+        $quote = null;
+
+        for ($position = strlen($sql) - 1; $position >= 0; $position--) {
+            $character = $sql[$position];
+
+            if ($quote !== null) {
+                if ($character === $quote) {
+                    $quote = null;
+                }
+
+                continue;
+            }
+
+            if ($character === "'" || $character === '"') {
+                $quote = $character;
+
+                continue;
+            }
+
+            if ($character === ')') {
+                $depth++;
+
+                continue;
+            }
+
+            if ($character !== '(') {
+                continue;
+            }
+
+            $depth--;
+
+            if ($depth === 0) {
+                return substr($sql, $position);
+            }
+        }
+
+        throw new NotSupported(sprintf('Cannot read the expressions of the index %s.', $sql));
     }
 
     /** The {@see RebuildPlan::tableKey()} of the table a CREATE TABLE statement creates. */

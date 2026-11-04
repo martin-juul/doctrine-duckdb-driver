@@ -197,11 +197,12 @@ class DuckDBSchemaManager extends AbstractSchemaManager
     {
         $rebuilder = new TableRebuilder($this->platform);
 
-        $rebuilder->run($this->connection, $rebuilder->schemaDiffSteps($schemaDiff));
+        $rebuilder->run($this->connection, $rebuilder->schemaDiffSteps($schemaDiff, $this->connection));
     }
 
     /**
-     * Applies the table diff; a rebuild covers only this table.
+     * Applies the table diff; a rebuild covers only this table and keeps its
+     * indexes on expressions.
      *
      * @throws Exception
      */
@@ -209,7 +210,7 @@ class DuckDBSchemaManager extends AbstractSchemaManager
     {
         $rebuilder = new TableRebuilder($this->platform);
 
-        $rebuilder->run($this->connection, $rebuilder->tableDiffSteps($tableDiff));
+        $rebuilder->run($this->connection, $rebuilder->tableDiffSteps($tableDiff, $this->connection));
     }
 
     /**
@@ -296,6 +297,7 @@ class DuckDBSchemaManager extends AbstractSchemaManager
             $rebuilds[$closureKey] = RebuildPlan::rebuild($old, $new->create(), null);
         }
 
+        $rebuilds  = DuckDBComparator::withExpressionIndexes($this->connection, $this->platform, $rebuilds);
         $rebuilder = new TableRebuilder($this->platform);
 
         $rebuilder->run($this->connection, $rebuilder->rebuildSteps($rebuilds));

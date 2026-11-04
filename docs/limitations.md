@@ -202,11 +202,17 @@ Workaround: change these tables with hand-written SQL.
 ### What a rebuild does not keep
 
 - **Named `ENUM` types:** a column of a named `ENUM` type (`CREATE TYPE mood AS ENUM (…)`) comes back as an anonymous `ENUM` with the same values.
-- **Indexes on expressions:** introspection skips indexes on expressions, such as `CREATE INDEX … ON t (lower(email))`, because DBAL cannot represent them. A rebuild therefore drops them. Recreate them in the same migration after the rebuild.
+- **Indexes on expressions, when the SQL comes from `getAlterTableSQL()`:** introspection skips indexes on expressions, such as `CREATE INDEX … ON t (lower(email))`, because DBAL cannot represent them. The rebuild reads them from DuckDB's catalog instead, which needs the connection. Schema diffs from the schema manager's comparator, the schema manager's `alterTable()`, `alterSchema()` and `renameTable()`, and `RebuildTables::queue()` keep them. `AbstractPlatform::getAlterTableSQL()` has no connection, so a rebuild it generates drops them. Recreate them in the same migration after the rebuild.
 
 ### Partial and expression indexes
 
-DuckDB cannot create partial indexes. An index with a `WHERE` clause (the `where` option) fails schema generation with `NotSupported`. DBAL cannot declare expression indexes; create them with SQL, and see the rebuild note above.
+DuckDB cannot create partial indexes. An index with a `WHERE` clause (the `where` option) fails schema generation with `NotSupported`. DBAL cannot declare expression indexes; create them with SQL.
+
+A rebuild recreates an expression index under its name, on the rebuilt or renamed table, except in these cases:
+
+- **The change renames or drops a column the index uses:** the rebuild fails and rolls back with "Cannot rebuild table …: its expression index … uses column …, which this change renames or drops. …". The check runs when the rebuild runs, not when the SQL is generated. Workaround: in the same migration, drop the index before the change and create it again afterwards.
+- **The SQL comes from `getAlterTableSQL()`:** see [What a rebuild does not keep](#what-a-rebuild-does-not-keep).
+- **The table has no other index:** a change that DuckDB can apply in place to an unindexed table, such as dropping a column or renaming the table, is applied in place, and DuckDB refuses it with "Dependency Error: Cannot alter entry … because there are entries that depend on it". Workaround: drop the expression index before the change and create it again afterwards.
 
 ## Introspection
 

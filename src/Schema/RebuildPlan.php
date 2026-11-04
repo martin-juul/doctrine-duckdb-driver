@@ -24,9 +24,19 @@ use function strtolower;
  * it. A rebuilt table is copied column by column: each pair names the old
  * column a value comes from and the new column it goes to.
  *
+ * A rebuild also carries the indexes on expressions of the old table, which
+ * DBAL cannot represent and introspection skips, as DuckDB's catalog reports
+ * them; only a caller with a connection can read them.
+ *
  * @internal
  *
- * @phpstan-type Rebuild array{old: Table, new: Table, columns: list<array{Column, Column}>}
+ * @phpstan-type ExpressionIndex array{schema: string, table: string, name: non-empty-string, unique: bool, sql: string}
+ * @phpstan-type Rebuild array{
+ *     old: Table,
+ *     new: Table,
+ *     columns: list<array{Column, Column}>,
+ *     expressionIndexes: list<ExpressionIndex>,
+ * }
  */
 final class RebuildPlan
 {
@@ -40,7 +50,8 @@ final class RebuildPlan
 
     /**
      * A rebuild entry whose columns are paired by the diff's renames, or by
-     * name when there is no diff.
+     * name when there is no diff. Its expression indexes are added by
+     * {@see DuckDBComparator::withExpressionIndexes()}.
      *
      * @return Rebuild
      */
@@ -50,6 +61,7 @@ final class RebuildPlan
             'old' => $old,
             'new' => $new,
             'columns' => self::pairColumns($old, $new, $diff),
+            'expressionIndexes' => [],
         ];
     }
 

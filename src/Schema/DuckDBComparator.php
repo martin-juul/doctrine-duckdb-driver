@@ -47,6 +47,12 @@ use function strtolower;
  *
  * When the platform omits foreign keys, the comparison ignores them, so a diff
  * never proposes adding one.
+ *
+ * With a connection, each rebuild also carries the indexes on expressions of
+ * its table, which DBAL cannot represent, so that the rebuild recreates them.
+ *
+ * @phpstan-import-type ExpressionIndex from RebuildPlan
+ * @phpstan-import-type Rebuild from RebuildPlan
  */
 final class DuckDBComparator extends Comparator
 {
@@ -96,6 +102,32 @@ final class DuckDBComparator extends Comparator
                 $column,
             ));
         }
+    }
+
+    /**
+     * Adds to each rebuild the indexes on expressions of its old table, which
+     * introspection skips because DBAL cannot represent them, so that the
+     * rebuild recreates them.
+     *
+     * @param array<string, Rebuild> $rebuilds The rebuilds, keyed by {@see RebuildPlan::tableKey()}.
+     *
+     * @return array<string, Rebuild>
+     *
+     * @throws Exception
+     */
+    public static function withExpressionIndexes(Connection $connection, DuckDBPlatform $platform, array $rebuilds): array
+    {
+        if (count($rebuilds) === 0) {
+            return $rebuilds;
+        }
+
+        $indexes = self::readExpressionIndexes($connection, $platform);
+
+        foreach (array_keys($rebuilds) as $key) {
+            $rebuilds[$key]['expressionIndexes'] = $indexes[$key] ?? [];
+        }
+
+        return $rebuilds;
     }
 
     protected function columnsEqual(Column $column1, Column $column2): bool
@@ -209,6 +241,8 @@ final class DuckDBComparator extends Comparator
             }
 
             self::assertNoGeneratedColumns($this->connection, $rebuilt);
+
+            $rebuilds = self::withExpressionIndexes($this->connection, $this->platform, $rebuilds);
         }
 
         return new RebuildPlan($native, $rebuilds);
@@ -376,6 +410,54 @@ final class DuckDBComparator extends Comparator
         }
 
         return $columns;
+    }
+
+    /**
+     * The indexes on expressions of each table, keyed by
+     * {@see RebuildPlan::tableKey()}: the indexes of duckdb_indexes() that
+     * introspection skips.
+     *
+     * @return array<string, list<ExpressionIndex>>
+     *
+     * @throws Exception
+     */
+    private static function readExpressionIndexes(Connection $connection, DuckDBPlatform $platform): array
+    {
+        $introspected = [];
+
+        foreach ($platform->createMetadataProvider($connection)->fetchIndexes(null, null) as $index) {
+            $introspected[$index['schema'] . "\0" . $index['table'] . "\0" . $index['name']] = true;
+        }
+
+        $currentSchema = $connection->fetchOne('SELECT current_schema()');
+        $indexes       = [];
+
+        $rows = $connection->fetchAllNumeric(<<<'SQL'
+            SELECT schema_name, table_name, index_name, is_unique, sql
+            FROM duckdb_indexes()
+            WHERE database_name = current_database()
+            ORDER BY schema_name, table_name, index_name
+            SQL);
+
+        foreach ($rows as [$schema, $table, $name, $unique, $sql]) {
+            if (! is_string($schema) || ! is_string($table) || ! is_string($name) || $name === '' || ! is_string($sql)) {
+                continue;
+            }
+
+            if (isset($introspected[$schema . "\0" . $table . "\0" . $name])) {
+                continue;
+            }
+
+            $indexes[self::catalogKey($schema, $table, $currentSchema)][] = [
+                'schema' => $schema,
+                'table' => $table,
+                'name' => $name,
+                'unique' => $unique === true,
+                'sql' => $sql,
+            ];
+        }
+
+        return $indexes;
     }
 
     /** The {@see RebuildPlan::tableKey()} of a table DuckDB's catalog names. */
