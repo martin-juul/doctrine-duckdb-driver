@@ -1,0 +1,38 @@
+{
+    "name": "martin-juul/dbal-duckdb-symfony-smoke",
+    "description": "Symfony application that exercises martin-juul/dbal-duckdb end to end",
+    "type": "project",
+    "license": "MIT",
+    "require": {
+        "php": "^8.4",
+        "ext-duckdb": "^2.0",
+        "doctrine/doctrine-bundle": "^3.3",
+        "doctrine/doctrine-migrations-bundle": "^3.4",
+        "doctrine/orm": "^3.7",
+        "martin-juul/dbal-duckdb": "dev-smoke",
+        "symfony/console": "^7.3",
+        "symfony/dotenv": "^7.3",
+        "symfony/framework-bundle": "^7.3",
+        "symfony/yaml": "^7.3"
+    },
+    "repositories": [
+        {
+            "type": "path",
+            "url": "../../..",
+            "options": {
+                "symlink": true,
+                "versions": {
+                    "martin-juul/dbal-duckdb": "dev-smoke"
+                }
+            }
+        }
+    ],
+    "autoload": {
+        "psr-4": {
+            "App\\": "src/"
+        }
+    },
+    "config": {
+        "sort-packages": true
+    }
+}

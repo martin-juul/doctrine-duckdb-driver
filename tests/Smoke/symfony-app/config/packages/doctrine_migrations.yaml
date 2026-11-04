@@ -1,0 +1,4 @@
+doctrine_migrations:
+    # Migrations are generated during the smoke run, so they live in var/.
+    migrations_paths:
+        'DoctrineMigrations': '%kernel.project_dir%/var/migrations'

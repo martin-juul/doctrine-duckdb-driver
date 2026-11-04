@@ -50,6 +50,7 @@
     "scripts": {
         "test": "phpunit",
         "phpstan": "phpstan analyse --memory-limit=1G",
-        "cs": "phpcs"
+        "cs": "phpcs",
+        "test:smoke": "bash tests/Smoke/run.sh"
     }
 }

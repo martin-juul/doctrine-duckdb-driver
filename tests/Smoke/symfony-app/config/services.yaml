@@ -1,0 +1,14 @@
+services:
+    _defaults:
+        autowire: true
+        autoconfigure: true
+
+    App\:
+        resource: '../src/'
+        exclude:
+            - '../src/Entity/'
+            - '../src/Kernel.php'
+
+    App\Doctrine\StagedNamingStrategy:
+        arguments:
+            $stage: '%env(int:SMOKE_SCHEMA_STAGE)%'
