@@ -33,7 +33,10 @@ use Doctrine\DBAL\Types\PhpDateTimeMappingType;
 use Doctrine\DBAL\Types\PhpTimeMappingType;
 use Doctrine\DBAL\Types\Type;
 use MartinJuul\DBAL\DuckDB\Platform\DuckDBPlatform;
+use MartinJuul\DBAL\DuckDB\Types\ListType;
+use MartinJuul\DBAL\DuckDB\Types\MapType;
 use MartinJuul\DBAL\DuckDB\Types\NativeType;
+use MartinJuul\DBAL\DuckDB\Types\StructType;
 use UnexpectedValueException;
 
 use function array_map;
@@ -771,7 +774,8 @@ final readonly class DuckDBMetadataProvider implements MetadataProvider
      * The DuckDB type string is parsed and mapped through the platform's type
      * mappings; a type without a mapping becomes {@see NativeType}. Columns of
      * the package's own `duckdb_*` types carry the DuckDB type string in the
-     * `duckdb_type` platform option.
+     * `duckdb_type` platform option; LIST, STRUCT and MAP columns also carry
+     * their inner types in the options their types declare them with.
      *
      * A default that draws from an owned sequence makes the column
      * `autoincrement` without a default. The sequence's name, qualified with
@@ -825,6 +829,13 @@ final readonly class DuckDBMetadataProvider implements MetadataProvider
         if (str_starts_with($typeName, 'duckdb_')) {
             $platformOptions[NativeType::DECLARATION_OPTION] = $dataType;
         }
+
+        $platformOptions += match ($typeName) {
+            ListType::NAME => ListType::platformOptionsFor($parsed),
+            StructType::NAME => StructType::platformOptionsFor($parsed),
+            MapType::NAME => MapType::platformOptionsFor($parsed),
+            default => [],
+        };
 
         if ($platformOptions !== []) {
             $options['platformOptions'] = $platformOptions;

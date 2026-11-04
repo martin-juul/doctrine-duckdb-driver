@@ -35,7 +35,13 @@ use MartinJuul\DBAL\DuckDB\Exception\ForeignKeyActionNotSupported;
 use MartinJuul\DBAL\DuckDB\Exception\ForeignKeyCycle;
 use MartinJuul\DBAL\DuckDB\Schema\DuckDBMetadataProvider;
 use MartinJuul\DBAL\DuckDB\Schema\DuckDBSchemaManager;
+use MartinJuul\DBAL\DuckDB\Types\HugeIntType;
+use MartinJuul\DBAL\DuckDB\Types\IntervalType;
+use MartinJuul\DBAL\DuckDB\Types\ListType;
+use MartinJuul\DBAL\DuckDB\Types\MapType;
 use MartinJuul\DBAL\DuckDB\Types\NativeType;
+use MartinJuul\DBAL\DuckDB\Types\StructType;
+use MartinJuul\DBAL\DuckDB\Types\TypeRegistrar;
 
 use function array_keys;
 use function array_map;
@@ -724,14 +730,15 @@ class DuckDBPlatform extends AbstractPlatform
     }
 
     /**
-     * Maps the type names DuckDB reports in its catalog. Types whose DBAL
-     * declaration would differ from the DuckDB type map to the opaque
+     * Maps the type names DuckDB reports in its catalog. LIST, STRUCT, MAP,
+     * HUGEINT and INTERVAL map to the package's own types. Other types whose
+     * DBAL declaration would differ from the DuckDB type map to the opaque
      * `duckdb_native` type, which keeps the DuckDB declaration, so that
      * introspection never proposes changing a column's type.
      */
     protected function initializeDoctrineTypeMappings(): void
     {
-        NativeType::register();
+        TypeRegistrar::register();
 
         $this->doctrineTypeMapping = [
             'array' => NativeType::NAME,
@@ -746,14 +753,14 @@ class DuckDBPlatform extends AbstractPlatform
             'enum' => NativeType::NAME,
             'float' => Types::SMALLFLOAT,
             'geometry' => NativeType::NAME,
-            'hugeint' => NativeType::NAME,
+            'hugeint' => HugeIntType::NAME,
             'integer' => Types::INTEGER,
-            'interval' => NativeType::NAME,
+            'interval' => IntervalType::NAME,
             'json' => Types::JSON,
-            'list' => NativeType::NAME,
-            'map' => NativeType::NAME,
+            'list' => ListType::NAME,
+            'map' => MapType::NAME,
             'smallint' => Types::SMALLINT,
-            'struct' => NativeType::NAME,
+            'struct' => StructType::NAME,
             'time' => Types::TIME_MUTABLE,
             'time with time zone' => NativeType::NAME,
             'timestamp' => Types::DATETIME_MUTABLE,
