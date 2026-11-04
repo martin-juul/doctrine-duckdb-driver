@@ -23,6 +23,7 @@ use Doctrine\DBAL\Schema\Name\Identifier;
 use Doctrine\DBAL\Schema\Name\OptionallyQualifiedName;
 use Doctrine\DBAL\Schema\Name\UnqualifiedName;
 use Doctrine\DBAL\Schema\Name\UnquotedIdentifierFolding;
+use Doctrine\DBAL\Schema\SchemaDiff;
 use Doctrine\DBAL\Schema\Sequence;
 use Doctrine\DBAL\Schema\Table;
 use Doctrine\DBAL\Schema\TableDiff;
@@ -35,6 +36,8 @@ use MartinJuul\DBAL\DuckDB\Exception\ForeignKeyActionNotSupported;
 use MartinJuul\DBAL\DuckDB\Exception\ForeignKeyCycle;
 use MartinJuul\DBAL\DuckDB\Schema\DuckDBMetadataProvider;
 use MartinJuul\DBAL\DuckDB\Schema\DuckDBSchemaManager;
+use MartinJuul\DBAL\DuckDB\Schema\RebuildPlan;
+use MartinJuul\DBAL\DuckDB\Schema\TableRebuilder;
 use MartinJuul\DBAL\DuckDB\Types\HugeIntType;
 use MartinJuul\DBAL\DuckDB\Types\IntervalType;
 use MartinJuul\DBAL\DuckDB\Types\ListType;
@@ -42,6 +45,7 @@ use MartinJuul\DBAL\DuckDB\Types\MapType;
 use MartinJuul\DBAL\DuckDB\Types\NativeType;
 use MartinJuul\DBAL\DuckDB\Types\StructType;
 use MartinJuul\DBAL\DuckDB\Types\TypeRegistrar;
+use WeakMap;
 
 use function array_keys;
 use function array_map;
@@ -119,6 +123,13 @@ class DuckDBPlatform extends AbstractPlatform
      * @var array<int, string>
      */
     private array $ownedSequenceDefaults = [];
+
+    /**
+     * The rebuild plans that the comparator registered, per schema diff.
+     *
+     * @var WeakMap<SchemaDiff, RebuildPlan>|null
+     */
+    private WeakMap|null $rebuildPlans = null;
 
     public function __construct()
     {
@@ -621,15 +632,54 @@ class DuckDBPlatform extends AbstractPlatform
         return parent::getDropIndexSQL($name, $table);
     }
 
-    // phpcs:disable Squiz.Commenting.FunctionComment.InvalidNoReturn -- temporary stub until the schema units land
-
-    /** @return list<string> */
+    /**
+     * Applies the diff with native ALTER statements where DuckDB can, and
+     * otherwise rebuilds the table; see {@see TableRebuilder}. Without the
+     * comparison a schema diff carries, only this table is rebuilt, so the
+     * rebuild fails at the drop when another table references it.
+     *
+     * @return list<string>
+     */
     public function getAlterTableSQL(TableDiff $diff): array
     {
-        throw NotSupported::new(__METHOD__);
+        $rebuilder = new TableRebuilder($this);
+
+        return $rebuilder->toSQL($rebuilder->tableDiffSteps($diff));
     }
 
-    // phpcs:enable
+    /**
+     * Produces one dependency-ordered statement list for the created, dropped,
+     * natively altered and rebuilt tables, using the plan that
+     * {@see DuckDBComparator} registered for the diff. A rebuild that includes
+     * a self-referencing table cannot be expressed as SQL and fails here.
+     *
+     * @return list<string>
+     */
+    public function getAlterSchemaSQL(SchemaDiff $diff): array
+    {
+        $rebuilder = new TableRebuilder($this);
+
+        return $rebuilder->toSQL($rebuilder->schemaDiffSteps($diff));
+    }
+
+    /**
+     * Records how a schema diff is applied. DBAL's SchemaDiff cannot carry
+     * the plan, so the comparator hands it over here.
+     *
+     * @internal
+     */
+    public function registerRebuildPlan(SchemaDiff $diff, RebuildPlan $plan): void
+    {
+        $this->rebuildPlans ??= new WeakMap();
+
+        $this->rebuildPlans[$diff] = $plan;
+    }
+
+    /** @internal */
+    public function getRebuildPlan(SchemaDiff $diff): RebuildPlan|null
+    {
+        return $this->rebuildPlans[$diff] ?? null;
+    }
 
     /** DuckDB has no sequence cache, so the cache size is not rendered. */
     public function getCreateSequenceSQL(Sequence $sequence): string

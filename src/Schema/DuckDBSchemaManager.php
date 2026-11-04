@@ -10,8 +10,12 @@ use Doctrine\DBAL\Exception\InvalidArgumentException;
 use Doctrine\DBAL\Result;
 use Doctrine\DBAL\Schema\AbstractSchemaManager;
 use Doctrine\DBAL\Schema\Column;
+use Doctrine\DBAL\Schema\ComparatorConfig;
 use Doctrine\DBAL\Schema\ForeignKeyConstraint;
+use Doctrine\DBAL\Schema\Name\Parsers;
+use Doctrine\DBAL\Schema\SchemaDiff;
 use Doctrine\DBAL\Schema\Sequence;
+use Doctrine\DBAL\Schema\TableDiff;
 use Doctrine\DBAL\Schema\View;
 use DuckDB\Database;
 use DuckDB\Exception as DuckDBException;
@@ -19,14 +23,19 @@ use MartinJuul\DBAL\DuckDB\Driver\Exception\DriverError;
 use MartinJuul\DBAL\DuckDB\Platform\DuckDBPlatform;
 
 use function array_filter;
+use function array_keys;
 use function array_map;
+use function array_pop;
 use function array_values;
 use function assert;
+use function count;
 use function explode;
 use function fclose;
 use function file_exists;
 use function fopen;
 use function fread;
+use function func_get_arg;
+use function func_num_args;
 use function in_array;
 use function is_string;
 use function preg_match;
@@ -164,6 +173,132 @@ class DuckDBSchemaManager extends AbstractSchemaManager
         foreach ($sequences as $sequence) {
             $this->connection->executeStatement($this->platform->getDropSequenceSQL($sequence));
         }
+    }
+
+    /**
+     * A comparator that also decides, per altered table, between native ALTER
+     * statements and a rebuild; see {@see DuckDBComparator}.
+     */
+    public function createComparator(/* ComparatorConfig $config = new ComparatorConfig() */): DuckDBComparator
+    {
+        $config = func_num_args() > 0 ? func_get_arg(0) : new ComparatorConfig();
+        assert($config instanceof ComparatorConfig);
+
+        return new DuckDBComparator($this->platform, $config, $this->connection);
+    }
+
+    /**
+     * Applies the schema diff, running the rebuild of a self-referencing
+     * table one tree level at a time, which generated SQL cannot express.
+     *
+     * @throws Exception
+     */
+    public function alterSchema(SchemaDiff $schemaDiff): void
+    {
+        $rebuilder = new TableRebuilder($this->platform);
+
+        $rebuilder->run($this->connection, $rebuilder->schemaDiffSteps($schemaDiff));
+    }
+
+    /**
+     * Applies the table diff; a rebuild covers only this table.
+     *
+     * @throws Exception
+     */
+    public function alterTable(TableDiff $tableDiff): void
+    {
+        $rebuilder = new TableRebuilder($this->platform);
+
+        $rebuilder->run($this->connection, $rebuilder->tableDiffSteps($tableDiff));
+    }
+
+    /**
+     * Renames the table natively when nothing stops DuckDB from doing so: no
+     * index on it and no foreign key referencing it, its own included.
+     * Otherwise rebuilds it under the new name together with every table that
+     * references it, transitively, retargeting their foreign keys. Either way
+     * the owned sequences keep their names, because DuckDB cannot rename
+     * sequences.
+     *
+     * @throws Exception
+     */
+    public function renameTable(string $name, string $newName): void
+    {
+        $tables = [];
+
+        foreach ($this->listTables() as $table) {
+            $tables[RebuildPlan::tableKey($table->getObjectName())] = $table;
+        }
+
+        $oldName = Parsers::parseOptionallyQualifiedName($name);
+        $key     = RebuildPlan::tableKey($oldName);
+        $table   = $tables[$key] ?? $this->introspectTable($name);
+
+        $referencedBy = [];
+
+        foreach ($tables as $childKey => $child) {
+            foreach ($child->getForeignKeys() as $foreignKey) {
+                $referencedBy[RebuildPlan::tableKey($foreignKey->getReferencedTableName())][$childKey] = true;
+            }
+        }
+
+        $indexed = false;
+
+        foreach ($table->getIndexes() as $index) {
+            if ($index->isPrimary()) {
+                continue;
+            }
+
+            $indexed = true;
+        }
+
+        if (! $indexed && ! isset($referencedBy[$key])) {
+            $this->connection->executeStatement($this->platform->getRenameTableSQL($name, $newName));
+
+            return;
+        }
+
+        $renamed = Parsers::parseOptionallyQualifiedName($newName);
+        $closure = [$key => $table];
+        $queue   = [$key];
+
+        while (count($queue) > 0) {
+            $parent = array_pop($queue);
+
+            foreach (array_keys($referencedBy[$parent] ?? []) as $childKey) {
+                if (isset($closure[$childKey])) {
+                    continue;
+                }
+
+                $closure[$childKey] = $tables[$childKey];
+                $queue[]            = $childKey;
+            }
+        }
+
+        DuckDBComparator::assertNoGeneratedColumns($this->connection, $closure);
+
+        $rebuilds = [];
+
+        foreach ($closure as $closureKey => $old) {
+            $new = $old->edit()->setForeignKeyConstraints(...array_map(
+                static fn (ForeignKeyConstraint $foreignKey): ForeignKeyConstraint => RebuildPlan::tableKey(
+                    $foreignKey->getReferencedTableName(),
+                ) === $key
+                    ? $foreignKey->edit()->setReferencedTableName($renamed)->create()
+                    : $foreignKey,
+                array_values($old->getForeignKeys()),
+            ));
+
+            if ($closureKey === $key) {
+                $new->setName($renamed);
+            }
+
+            $rebuilds[$closureKey] = RebuildPlan::rebuild($old, $new->create(), null);
+        }
+
+        $rebuilder = new TableRebuilder($this->platform);
+
+        $rebuilder->run($this->connection, $rebuilder->rebuildSteps($rebuilds));
     }
 
     /**
