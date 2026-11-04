@@ -5,39 +5,54 @@ declare(strict_types=1);
 namespace MartinJuul\DBAL\DuckDB\Driver;
 
 use Doctrine\DBAL\Driver\Connection as ConnectionInterface;
+use Doctrine\DBAL\Driver\Result as ResultInterface;
+use Doctrine\DBAL\Driver\Statement as StatementInterface;
 use DuckDB\Connection as NativeConnection;
 use DuckDB\Database;
-use DuckDB\Exception as DuckDBException;
-use MartinJuul\DBAL\DuckDB\Driver\Exception\DriverError;
 use MartinJuul\DBAL\DuckDB\Driver\Exception\IdentityColumnsNotSupported;
 
 use function DuckDB\version;
 use function str_replace;
 
+/**
+ * A DuckDB connection whose transaction emulates DBAL's nested levels; see
+ * TransactionState and StatementClassifier.
+ */
 final class Connection implements ConnectionInterface
 {
+    private readonly TransactionState $transaction;
+
     public function __construct(
         private readonly Database $database,
         private readonly NativeConnection $connection,
     ) {
+        $this->transaction = new TransactionState($connection);
     }
 
-    public function prepare(string $sql): Statement
+    public function prepare(string $sql): StatementInterface
     {
-        try {
-            return new Statement($this->connection->prepare($sql));
-        } catch (DuckDBException $e) {
-            throw DriverError::fromDuckDB($e);
+        $kind = StatementClassifier::classify($sql);
+
+        if ($kind !== StatementKind::Plain) {
+            return new MarkerStatement($this->transaction, $kind, $sql);
         }
+
+        return $this->transaction->run(
+            fn (): Statement => new Statement($this->connection->prepare($sql), $this->transaction),
+        );
     }
 
-    public function query(string $sql): Result
+    public function query(string $sql): ResultInterface
     {
-        try {
-            return new Result($this->connection->query($sql));
-        } catch (DuckDBException $e) {
-            throw DriverError::fromDuckDB($e);
+        $kind = StatementClassifier::classify($sql);
+
+        if ($kind !== StatementKind::Plain) {
+            $this->transaction->intercept($kind, $sql);
+
+            return new EmptyResult();
         }
+
+        return $this->transaction->run(fn (): Result => new Result($this->connection->query($sql)));
     }
 
     public function quote(string $value): string
@@ -47,11 +62,15 @@ final class Connection implements ConnectionInterface
 
     public function exec(string $sql): int
     {
-        try {
-            return $this->connection->query($sql)->rowsChanged();
-        } catch (DuckDBException $e) {
-            throw DriverError::fromDuckDB($e);
+        $kind = StatementClassifier::classify($sql);
+
+        if ($kind !== StatementKind::Plain) {
+            $this->transaction->intercept($kind, $sql);
+
+            return 0;
         }
+
+        return $this->transaction->run(fn (): int => $this->connection->query($sql)->rowsChanged());
     }
 
     public function lastInsertId(): never
@@ -61,29 +80,22 @@ final class Connection implements ConnectionInterface
 
     public function beginTransaction(): void
     {
-        try {
-            $this->connection->beginTransaction();
-        } catch (DuckDBException $e) {
-            throw DriverError::fromDuckDB($e);
-        }
+        $this->transaction->begin();
     }
 
+    /**
+     * Commits, or ends the transaction and throws when DuckDB fails to commit
+     * or an inner level rolled back; nothing is committed then.
+     */
     public function commit(): void
     {
-        try {
-            $this->connection->commit();
-        } catch (DuckDBException $e) {
-            throw DriverError::fromDuckDB($e);
-        }
+        $this->transaction->commit();
     }
 
+    /** Rolls back, and succeeds when DuckDB already ended the transaction. */
     public function rollBack(): void
     {
-        try {
-            $this->connection->rollBack();
-        } catch (DuckDBException $e) {
-            throw DriverError::fromDuckDB($e);
-        }
+        $this->transaction->rollBack();
     }
 
     public function getNativeConnection(): NativeConnection

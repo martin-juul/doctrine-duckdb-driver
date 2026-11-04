@@ -6,7 +6,6 @@ namespace MartinJuul\DBAL\DuckDB\Driver;
 
 use Doctrine\DBAL\Driver\Statement as StatementInterface;
 use Doctrine\DBAL\ParameterType;
-use DuckDB\Exception as DuckDBException;
 use DuckDB\Statement as NativeStatement;
 use MartinJuul\DBAL\DuckDB\Driver\Exception\DriverError;
 use MartinJuul\DBAL\DuckDB\Driver\Exception\InvalidUtf8Parameter;
@@ -24,8 +23,10 @@ final class Statement implements StatementInterface
     /** @var array<int|string, array{mixed, ParameterType}> */
     private array $parameters = [];
 
-    public function __construct(private readonly NativeStatement $statement)
-    {
+    public function __construct(
+        private readonly NativeStatement $statement,
+        private readonly TransactionState $transaction,
+    ) {
     }
 
     public function bindValue(int|string $param, mixed $value, ParameterType $type): void
@@ -33,21 +34,22 @@ final class Statement implements StatementInterface
         $this->parameters[$param] = [$value, $type];
     }
 
+    /** Refused while the transaction is rollback-only, like every statement of the connection. */
     public function execute(): Result
     {
-        try {
-            $this->statement->clearBindings();
+        return $this->transaction->run(function (): Result {
+            try {
+                $this->statement->clearBindings();
 
-            foreach ($this->parameters as $param => [$value, $type]) {
-                $this->bind($param, $value, $type);
+                foreach ($this->parameters as $param => [$value, $type]) {
+                    $this->bind($param, $value, $type);
+                }
+
+                return new Result($this->statement->execute());
+            } catch (ValueError | TypeError $e) {
+                throw DriverError::fromBinding($e);
             }
-
-            return new Result($this->statement->execute());
-        } catch (DuckDBException $e) {
-            throw DriverError::fromDuckDB($e);
-        } catch (ValueError | TypeError $e) {
-            throw DriverError::fromBinding($e);
-        }
+        });
     }
 
     private function bind(int|string $param, mixed $value, ParameterType $type): void

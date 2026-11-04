@@ -18,10 +18,13 @@ use Doctrine\DBAL\Exception\ServerException;
 use Doctrine\DBAL\Exception\SyntaxErrorException;
 use Doctrine\DBAL\Exception\TableExistsException;
 use Doctrine\DBAL\Exception\TableNotFoundException;
+use Doctrine\DBAL\Exception\TransactionRolledBack;
 use Doctrine\DBAL\Exception\UniqueConstraintViolationException;
 use Doctrine\DBAL\Query;
 use DuckDB\ErrorType;
+use MartinJuul\DBAL\DuckDB\Driver\Exception\CommitFailed;
 use MartinJuul\DBAL\DuckDB\Driver\Exception\DriverError;
+use MartinJuul\DBAL\DuckDB\Driver\Exception\RollbackOnly;
 use MartinJuul\DBAL\DuckDB\Exception\EarlyForeignKeyCheckViolation;
 
 use function preg_match;
@@ -45,6 +48,19 @@ final class ExceptionConverter implements ExceptionConverterInterface
     public function convert(Exception $exception, Query|null $query): DriverException
     {
         $message = $exception->getMessage();
+
+        // The transaction can only end in a rollback, or already has (KTD2, KTD3).
+        if ($exception instanceof RollbackOnly) {
+            return new TransactionRolledBack($exception, $query);
+        }
+
+        if ($exception instanceof CommitFailed) {
+            if (self::isUniqueViolation($message)) {
+                return new UniqueConstraintViolationException($exception, $query);
+            }
+
+            return new TransactionRolledBack($exception, $query);
+        }
 
         return match (ErrorType::tryFrom($exception->getCode())) {
             ErrorType::Constraint => self::convertConstraintViolation($exception, $message, $query),
