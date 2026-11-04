@@ -13,11 +13,13 @@ use Doctrine\DBAL\Platforms\Exception\NotSupported;
 use Doctrine\DBAL\Platforms\Keywords\KeywordList;
 use Doctrine\DBAL\Query\SelectQuery;
 use Doctrine\DBAL\Schema\Column;
+use Doctrine\DBAL\Schema\DefaultExpression;
 use Doctrine\DBAL\Schema\ForeignKeyConstraint;
 use Doctrine\DBAL\Schema\ForeignKeyConstraint\ReferentialAction;
 use Doctrine\DBAL\Schema\Index;
 use Doctrine\DBAL\Schema\Index\IndexedColumn;
 use Doctrine\DBAL\Schema\Index\IndexType;
+use Doctrine\DBAL\Schema\Name\Identifier;
 use Doctrine\DBAL\Schema\Name\OptionallyQualifiedName;
 use Doctrine\DBAL\Schema\Name\UnqualifiedName;
 use Doctrine\DBAL\Schema\Name\UnquotedIdentifierFolding;
@@ -47,9 +49,13 @@ use function crc32;
 use function dechex;
 use function explode;
 use function implode;
+use function is_string;
+use function preg_match;
 use function sort;
 use function sprintf;
 use function str_contains;
+use function str_ends_with;
+use function str_replace;
 use function strtolower;
 use function strtoupper;
 use function substr;
@@ -65,11 +71,31 @@ use function substr;
  * creation inlines foreign keys and orders tables parents first, and foreign
  * keys cannot be added or dropped later.
  *
+ * DuckDB 2.0 has no identity columns, so an `autoincrement` column draws its
+ * values from a sequence that the platform creates with the table: an owned
+ * sequence, named after the table and column with the
+ * {@see self::OWNED_SEQUENCE_SUFFIX} suffix. Owned sequences are recognised by
+ * the column's `nextval` default, never by the table's name, because DuckDB
+ * cannot rename sequences and a renamed table keeps its sequence's name.
+ *
  * @phpstan-import-type ColumnProperties from Column
  * @phpstan-import-type CreateTableParameters from AbstractPlatform
  */
 class DuckDBPlatform extends AbstractPlatform
 {
+    /**
+     * The suffix of the sequences that the platform creates for autoincrement
+     * columns. It differs from ORM's `<table>_<column>_seq`, so an ORM
+     * sequence never collides with an owned one.
+     */
+    public const string OWNED_SEQUENCE_SUFFIX = '__autoinc';
+
+    /**
+     * The platform option of an introspected autoincrement column that holds
+     * the SQL name of the owned sequence its default draws from.
+     */
+    public const string OWNED_SEQUENCE_OPTION = 'duckdb_owned_sequence';
+
     private bool $omitForeignKeys = false;
 
     /**
@@ -79,6 +105,14 @@ class DuckDBPlatform extends AbstractPlatform
      * @var array<string, non-empty-list<UnqualifiedName>>
      */
     private array $referencedColumnLists = [];
+
+    /**
+     * While a table's CREATE statement is built: the `nextval` default of each
+     * autoincrement column, keyed by the column's position.
+     *
+     * @var array<int, string>
+     */
+    private array $ownedSequenceDefaults = [];
 
     public function __construct()
     {
@@ -315,11 +349,25 @@ class DuckDBPlatform extends AbstractPlatform
 
         foreach ($tables as $table) {
             $this->referencedColumnLists = $referenced[self::tableKey($table->getObjectName())] ?? [];
+            $this->ownedSequenceDefaults = [];
+
+            foreach ($table->getColumns() as $position => $column) {
+                if (! $column->getAutoincrement()) {
+                    continue;
+                }
+
+                $sequence = $this->getOwnedSequenceName($table->getObjectName(), $column)->toSQL($this);
+
+                $sql[] = 'CREATE SEQUENCE ' . $sequence;
+
+                $this->ownedSequenceDefaults[$position] = 'nextval(' . $this->quoteStringLiteral($sequence) . ')';
+            }
 
             try {
                 $sql = array_merge($sql, parent::getCreateTableSQL($table));
             } finally {
                 $this->referencedColumnLists = [];
+                $this->ownedSequenceDefaults = [];
             }
         }
 
@@ -327,8 +375,10 @@ class DuckDBPlatform extends AbstractPlatform
     }
 
     /**
-     * Drops the tables children first. DuckDB cannot drop a foreign key on
-     * its own, so no foreign-key drop statements are produced.
+     * Drops the tables children first, each followed by the owned sequences
+     * of its autoincrement columns, which DuckDB refuses to drop while the
+     * table exists. DuckDB cannot drop a foreign key on its own, so no
+     * foreign-key drop statements are produced.
      *
      * @param array<Table> $tables
      *
@@ -346,9 +396,83 @@ class DuckDBPlatform extends AbstractPlatform
 
         foreach ($tables as $table) {
             $sql[] = $this->getDropTableSQL($table->getObjectName()->toSQL($this));
+
+            foreach ($table->getColumns() as $column) {
+                if (! $column->getAutoincrement()) {
+                    continue;
+                }
+
+                // A table that was not created by this platform may lack the sequence.
+                $sql[] = 'DROP SEQUENCE IF EXISTS ' . $this->getOwnedSequenceName($table->getObjectName(), $column)
+                    ->toSQL($this);
+            }
         }
 
         return $sql;
+    }
+
+    /**
+     * The owned sequence of an autoincrement column: the sequence named in
+     * the column's {@see self::OWNED_SEQUENCE_OPTION} platform option, which
+     * introspection sets, or else `<table>_<column>` with the owned suffix,
+     * in the table's schema.
+     */
+    public function getOwnedSequenceName(OptionallyQualifiedName $table, Column $column): OptionallyQualifiedName
+    {
+        $name = self::getIntrospectedOwnedSequenceName($column->toArray(true));
+
+        if ($name !== null) {
+            return $name;
+        }
+
+        $tableName  = $table->getUnqualifiedName();
+        $columnName = $column->getObjectName()->getIdentifier();
+        $value      = $tableName->getValue() . '_' . $columnName->getValue() . self::OWNED_SEQUENCE_SUFFIX;
+        $qualifier  = $table->getQualifier();
+
+        if ($tableName->isQuoted() || $columnName->isQuoted()) {
+            return new OptionallyQualifiedName(Identifier::quoted($value), $qualifier);
+        }
+
+        return new OptionallyQualifiedName(Identifier::unquoted($value), $qualifier);
+    }
+
+    /**
+     * The owned sequence named in the {@see self::OWNED_SEQUENCE_OPTION}
+     * platform option of an introspected column, or null when the column has
+     * none.
+     *
+     * @param array<string, mixed> $column The column's properties, as {@see Column::toArray()} returns them.
+     */
+    public static function getIntrospectedOwnedSequenceName(array $column): OptionallyQualifiedName|null
+    {
+        $option = $column[self::OWNED_SEQUENCE_OPTION] ?? null;
+
+        if (! is_string($option)) {
+            return null;
+        }
+
+        return self::parseSequenceName($option);
+    }
+
+    /**
+     * The owned sequence that a column default draws from, or null when the
+     * default is not `nextval('<sequence>')` for a sequence with the owned
+     * suffix.
+     */
+    public function parseOwnedSequenceDefault(string $default): OptionallyQualifiedName|null
+    {
+        if (preg_match('/^\s*nextval\s*\(\s*\'((?:[^\']|\'\')*)\'\s*\)\s*$/is', $default, $matches) !== 1) {
+            return null;
+        }
+
+        $name = self::parseSequenceName(str_replace("''", "'", $matches[1]));
+
+        if ($name === null || ! str_ends_with($name->getUnqualifiedName()->getValue(), self::OWNED_SEQUENCE_SUFFIX)) {
+            return null;
+        }
+
+        return $name;
     }
 
     /**
@@ -366,6 +490,16 @@ class DuckDBPlatform extends AbstractPlatform
     protected function _getCreateTableSQL(string $name, array $columns, array $options = []): array
     {
         $this->validateCreateTableOptions($options, __METHOD__);
+
+        foreach ($columns as $position => $column) {
+            if (! isset($this->ownedSequenceDefaults[$position])) {
+                continue;
+            }
+
+            $column['default'] = self::rawDefault($this->ownedSequenceDefaults[$position]);
+
+            $columns[$position] = $column;
+        }
 
         $indexes           = $options['indexes'] ?? [];
         $uniqueConstraints = $options['uniqueConstraints'] ?? [];
@@ -662,6 +796,61 @@ class DuckDBPlatform extends AbstractPlatform
                 . 'Use optimistic locking with a version column instead.',
             $request,
         ));
+    }
+
+    /**
+     * Parses a sequence name as SQL writes it, such as `seq`, `"Odd Seq"` or
+     * `s.seq`, into its parts. Returns null for anything else.
+     */
+    private static function parseSequenceName(string $sql): OptionallyQualifiedName|null
+    {
+        $part = '\s*(?:"((?:[^"]|"")+)"|([^\s".]+))\s*';
+
+        if (preg_match('/^' . $part . '(?:\.' . $part . ')?$/s', $sql, $matches) !== 1) {
+            return null;
+        }
+
+        $first  = self::sequenceNamePart($matches[1] ?? '', $matches[2] ?? '');
+        $second = self::sequenceNamePart($matches[3] ?? '', $matches[4] ?? '');
+
+        if ($first === null) {
+            return null;
+        }
+
+        if ($second === null) {
+            return new OptionallyQualifiedName($first, null);
+        }
+
+        return new OptionallyQualifiedName($second, $first);
+    }
+
+    /** One part of a sequence name: the inside of a quoted identifier, or else a bare one. */
+    private static function sequenceNamePart(string $quoted, string $bare): Identifier|null
+    {
+        if ($quoted !== '') {
+            return Identifier::quoted(str_replace('""', '"', $quoted));
+        }
+
+        if ($bare !== '') {
+            return Identifier::unquoted($bare);
+        }
+
+        return null;
+    }
+
+    /** A default expression that renders the given SQL as written. */
+    private static function rawDefault(string $sql): DefaultExpression
+    {
+        return new class ($sql) implements DefaultExpression {
+            public function __construct(private readonly string $sql)
+            {
+            }
+
+            public function toSQL(AbstractPlatform $platform): string
+            {
+                return $this->sql;
+            }
+        };
     }
 
     private static function assertReferentialActionsSupported(Table $table): void

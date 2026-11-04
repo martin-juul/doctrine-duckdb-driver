@@ -25,6 +25,8 @@ use Doctrine\DBAL\Schema\Metadata\TableColumnMetadataRow;
 use Doctrine\DBAL\Schema\Metadata\TableMetadataRow;
 use Doctrine\DBAL\Schema\Metadata\UniqueConstraintColumnMetadataRow;
 use Doctrine\DBAL\Schema\Metadata\ViewMetadataRow;
+use Doctrine\DBAL\Schema\Name\Identifier;
+use Doctrine\DBAL\Schema\Name\OptionallyQualifiedName;
 use Doctrine\DBAL\Types\BooleanType;
 use Doctrine\DBAL\Types\PhpDateMappingType;
 use Doctrine\DBAL\Types\PhpDateTimeMappingType;
@@ -68,6 +70,11 @@ use function usort;
  * DBAL names an unnamed unique index, and a foreign key is named the way DBAL
  * names an unnamed foreign key. Unique constraints themselves are never
  * reported, because DBAL's comparator compares only indexes.
+ *
+ * A column whose default draws from an owned sequence (see
+ * {@see DuckDBPlatform::OWNED_SEQUENCE_SUFFIX}) is reported as an
+ * `autoincrement` column without a default, and the owned sequences are not
+ * reported as sequences.
  *
  * The public methods that are not part of {@see MetadataProvider} serve
  * {@see DuckDBSchemaManager} and are not a stable API.
@@ -433,8 +440,10 @@ final readonly class DuckDBMetadataProvider implements MetadataProvider
         foreach ($this->selectColumns($schemaName, $tableName)->iterateNumeric() as $row) {
             [$schema, $table, $name, $dataType, $nullable, $default, $comment] = $row;
 
+            $schema = self::nonEmptyString($schema);
+
             $columns[] = [
-                'schema' => self::nonEmptyString($schema),
+                'schema' => $schema,
                 'table' => self::nonEmptyString($table),
                 'column' => $this->createColumn(
                     self::nonEmptyString($name),
@@ -442,6 +451,7 @@ final readonly class DuckDBMetadataProvider implements MetadataProvider
                     (bool) $nullable,
                     is_string($default) ? $default : null,
                     is_string($comment) ? $comment : null,
+                    $schema,
                 ),
             ];
         }
@@ -704,6 +714,9 @@ final readonly class DuckDBMetadataProvider implements MetadataProvider
     }
 
     /**
+     * The sequences of the current database, except the owned sequences of
+     * autoincrement columns.
+     *
      * @return list<array{
      *     schema: non-empty-string,
      *     name: non-empty-string,
@@ -715,6 +728,8 @@ final readonly class DuckDBMetadataProvider implements MetadataProvider
      */
     public function fetchSequences(): array
     {
+        $owned = $this->fetchOwnedSequenceKeys();
+
         $sql = <<<'SQL'
             SELECT q.schema_name,
                    q.sequence_name,
@@ -732,9 +747,16 @@ final readonly class DuckDBMetadataProvider implements MetadataProvider
         $sequences = [];
 
         foreach ($this->connection->iterateNumeric($sql) as [$schema, $name, $increment, $start]) {
+            $schema = self::nonEmptyString($schema);
+            $name   = self::nonEmptyString($name);
+
+            if (isset($owned[self::objectKey($schema, $name)])) {
+                continue;
+            }
+
             $sequences[] = [
-                'schema' => self::nonEmptyString($schema),
-                'name' => self::nonEmptyString($name),
+                'schema' => $schema,
+                'name' => $name,
                 'allocationSize' => self::integer($increment),
                 'initialValue' => self::integer($start),
             ];
@@ -751,8 +773,14 @@ final readonly class DuckDBMetadataProvider implements MetadataProvider
      * the package's own `duckdb_*` types carry the DuckDB type string in the
      * `duckdb_type` platform option.
      *
-     * @param non-empty-string $name
-     * @param non-empty-string $dataType
+     * A default that draws from an owned sequence makes the column
+     * `autoincrement` without a default. The sequence's name, qualified with
+     * the table's schema when given, is kept in the platform option
+     * {@see DuckDBPlatform::OWNED_SEQUENCE_OPTION}.
+     *
+     * @param non-empty-string  $name
+     * @param non-empty-string  $dataType
+     * @param ?non-empty-string $schemaName The schema of the column's table.
      */
     public function createColumn(
         string $name,
@@ -760,6 +788,7 @@ final readonly class DuckDBMetadataProvider implements MetadataProvider
         bool $nullable,
         string|null $default,
         string|null $comment,
+        string|null $schemaName = null,
     ): Column {
         $parsed   = TypeStringParser::parse($dataType);
         $typeName = NativeType::NAME;
@@ -768,10 +797,21 @@ final readonly class DuckDBMetadataProvider implements MetadataProvider
             $typeName = $this->platform->getDoctrineTypeMapping($parsed['name']);
         }
 
+        $ownedSequence   = $this->ownedSequence($default, $schemaName);
+        $platformOptions = [];
+
         $options = [
             'notnull' => ! $nullable,
-            'default' => self::normalizeDefault($default, $typeName),
+            'default' => null,
         ];
+
+        if ($ownedSequence === null) {
+            $options['default'] = self::normalizeDefault($default, $typeName);
+        } else {
+            $options['autoincrement'] = true;
+
+            $platformOptions[DuckDBPlatform::OWNED_SEQUENCE_OPTION] = $ownedSequence->toSQL($this->platform);
+        }
 
         if ($parsed['name'] === 'DECIMAL' && isset($parsed['arguments'][0], $parsed['arguments'][1])) {
             $options['precision'] = $parsed['arguments'][0];
@@ -783,7 +823,11 @@ final readonly class DuckDBMetadataProvider implements MetadataProvider
         }
 
         if (str_starts_with($typeName, 'duckdb_')) {
-            $options['platformOptions'] = [NativeType::DECLARATION_OPTION => $dataType];
+            $platformOptions[NativeType::DECLARATION_OPTION] = $dataType;
+        }
+
+        if ($platformOptions !== []) {
+            $options['platformOptions'] = $platformOptions;
         }
 
         return new Column($this->platform->quoteSingleIdentifier($name), $typeName, $options);
@@ -866,6 +910,78 @@ final readonly class DuckDBMetadataProvider implements MetadataProvider
         ));
 
         return self::nonEmptyString(strtoupper(substr($prefix . '_' . $hash, 0, $this->platform->getMaxIdentifierLength())));
+    }
+
+    /**
+     * The owned sequences that column defaults of the current database's
+     * tables draw from, keyed by {@see self::objectKey()}.
+     *
+     * @return array<string, true>
+     *
+     * @throws Exception
+     */
+    private function fetchOwnedSequenceKeys(): array
+    {
+        $params = [];
+        $where  = $this->buildTablePredicate(null, null, $params);
+
+        $sql = <<<SQL
+            SELECT c.schema_name,
+                   c.column_default
+            FROM duckdb_columns() c
+            JOIN duckdb_tables() t ON t.table_oid = c.table_oid
+            JOIN duckdb_schemas() s ON s.oid = t.schema_oid
+            WHERE {$where}
+              AND c.column_default IS NOT NULL
+            SQL;
+
+        $keys = [];
+
+        foreach ($this->connection->iterateNumeric($sql, $params) as [$schema, $default]) {
+            $sequence = $this->ownedSequence(is_string($default) ? $default : null, self::nonEmptyString($schema));
+
+            if ($sequence === null) {
+                continue;
+            }
+
+            $qualifier = $sequence->getQualifier();
+
+            if ($qualifier === null) {
+                continue;
+            }
+
+            $keys[self::objectKey($qualifier->getValue(), $sequence->getUnqualifiedName()->getValue())] = true;
+        }
+
+        return $keys;
+    }
+
+    /**
+     * The owned sequence a column default draws from, qualified with the
+     * given schema when the default names none: the platform creates an owned
+     * sequence in the schema of its table.
+     *
+     * @param ?non-empty-string $schemaName
+     */
+    private function ownedSequence(string|null $default, string|null $schemaName): OptionallyQualifiedName|null
+    {
+        if ($default === null) {
+            return null;
+        }
+
+        $sequence = $this->platform->parseOwnedSequenceDefault($default);
+
+        if ($sequence === null || $sequence->getQualifier() !== null || $schemaName === null) {
+            return $sequence;
+        }
+
+        return new OptionallyQualifiedName($sequence->getUnqualifiedName(), Identifier::quoted($schemaName));
+    }
+
+    /** DuckDB matches identifiers case-insensitively, quoted or not. */
+    private static function objectKey(string $schemaName, string $name): string
+    {
+        return strtolower($schemaName) . "\0" . strtolower($name);
     }
 
     /**

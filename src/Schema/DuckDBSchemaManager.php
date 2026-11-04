@@ -135,6 +135,38 @@ class DuckDBSchemaManager extends AbstractSchemaManager
     }
 
     /**
+     * Drops the table, then the owned sequences of its autoincrement columns,
+     * which DuckDB refuses to drop while the table exists. The sequences are
+     * found from the column defaults, so a renamed table drops the sequence
+     * that still carries its old name.
+     *
+     * @throws Exception
+     */
+    public function dropTable(string $name): void
+    {
+        $sequences = [];
+
+        foreach ($this->fetchTableColumns('', $this->normalizeName($name)) as $row) {
+            $column = $row['column'];
+            assert($column instanceof Column);
+
+            $sequence = DuckDBPlatform::getIntrospectedOwnedSequenceName($column->toArray(true));
+
+            if ($sequence === null) {
+                continue;
+            }
+
+            $sequences[] = $sequence->toSQL($this->platform);
+        }
+
+        $this->connection->executeStatement($this->platform->getDropTableSQL($name));
+
+        foreach ($sequences as $sequence) {
+            $this->connection->executeStatement($this->platform->getDropSequenceSQL($sequence));
+        }
+    }
+
+    /**
      * The schemas of the current database, including the default `main`
      * schema, which Doctrine Migrations adds to the schema it compares with.
      *
