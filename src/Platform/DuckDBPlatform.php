@@ -12,7 +12,6 @@ use Doctrine\DBAL\Platforms\DateIntervalUnit;
 use Doctrine\DBAL\Platforms\Exception\NotSupported;
 use Doctrine\DBAL\Platforms\Keywords\KeywordList;
 use Doctrine\DBAL\Query\SelectQuery;
-use Doctrine\DBAL\Schema\AbstractSchemaManager;
 use Doctrine\DBAL\Schema\Column;
 use Doctrine\DBAL\Schema\ForeignKeyConstraint;
 use Doctrine\DBAL\Schema\ForeignKeyConstraint\ReferentialAction;
@@ -32,6 +31,9 @@ use Doctrine\DBAL\TransactionIsolationLevel;
 use Doctrine\DBAL\Types\Types;
 use MartinJuul\DBAL\DuckDB\Exception\ForeignKeyActionNotSupported;
 use MartinJuul\DBAL\DuckDB\Exception\ForeignKeyCycle;
+use MartinJuul\DBAL\DuckDB\Schema\DuckDBMetadataProvider;
+use MartinJuul\DBAL\DuckDB\Schema\DuckDBSchemaManager;
+use MartinJuul\DBAL\DuckDB\Types\NativeType;
 
 use function array_keys;
 use function array_map;
@@ -587,25 +589,54 @@ class DuckDBPlatform extends AbstractPlatform
         return 'BLOB';
     }
 
+    /**
+     * Maps the type names DuckDB reports in its catalog. Types whose DBAL
+     * declaration would differ from the DuckDB type map to the opaque
+     * `duckdb_native` type, which keeps the DuckDB declaration, so that
+     * introspection never proposes changing a column's type.
+     */
     protected function initializeDoctrineTypeMappings(): void
     {
+        NativeType::register();
+
         $this->doctrineTypeMapping = [
+            'array' => NativeType::NAME,
             'bigint' => Types::BIGINT,
+            'bignum' => NativeType::NAME,
+            'bit' => NativeType::NAME,
             'blob' => Types::BLOB,
             'boolean' => Types::BOOLEAN,
             'date' => Types::DATE_MUTABLE,
             'decimal' => Types::DECIMAL,
             'double' => Types::FLOAT,
+            'enum' => NativeType::NAME,
             'float' => Types::SMALLFLOAT,
+            'geometry' => NativeType::NAME,
+            'hugeint' => NativeType::NAME,
             'integer' => Types::INTEGER,
-            'interval' => Types::DATEINTERVAL,
+            'interval' => NativeType::NAME,
             'json' => Types::JSON,
+            'list' => NativeType::NAME,
+            'map' => NativeType::NAME,
             'smallint' => Types::SMALLINT,
+            'struct' => NativeType::NAME,
             'time' => Types::TIME_MUTABLE,
+            'time with time zone' => NativeType::NAME,
             'timestamp' => Types::DATETIME_MUTABLE,
             'timestamp with time zone' => Types::DATETIMETZ_MUTABLE,
+            'timestamp_ms' => NativeType::NAME,
+            'timestamp_ns' => NativeType::NAME,
+            'timestamp_s' => NativeType::NAME,
+            'tinyint' => NativeType::NAME,
+            'ubigint' => NativeType::NAME,
+            'uhugeint' => NativeType::NAME,
+            'uinteger' => NativeType::NAME,
+            'union' => NativeType::NAME,
+            'usmallint' => NativeType::NAME,
+            'utinyint' => NativeType::NAME,
             'uuid' => Types::GUID,
             'varchar' => Types::STRING,
+            'variant' => NativeType::NAME,
         ];
     }
 
@@ -614,15 +645,15 @@ class DuckDBPlatform extends AbstractPlatform
         return new DuckDBKeywords();
     }
 
-    // phpcs:disable Squiz.Commenting.FunctionComment.InvalidNoReturn -- temporary stub until the schema units land
-
-    /** @return AbstractSchemaManager<self> */
-    public function createSchemaManager(Connection $connection): AbstractSchemaManager
+    public function createSchemaManager(Connection $connection): DuckDBSchemaManager
     {
-        throw NotSupported::new(__METHOD__);
+        return new DuckDBSchemaManager($connection, $this);
     }
 
-    // phpcs:enable
+    public function createMetadataProvider(Connection $connection): DuckDBMetadataProvider
+    {
+        return new DuckDBMetadataProvider($connection, $this);
+    }
 
     private static function rowLocksNotSupported(string $request): NotSupported
     {
