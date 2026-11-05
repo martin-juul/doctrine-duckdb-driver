@@ -48,6 +48,11 @@ final class ExceptionConverter implements ExceptionConverterInterface
         . 'DuckDB instance per database file, so every connection to this file must pass the same '
         . 'driverOptions as the connections already open on it.';
 
+    private const string FOREIGN_KEY_TARGET_EXPLANATION = 'DuckDB needs a PRIMARY KEY or UNIQUE constraint on the '
+        . 'referenced columns, in the foreign key\'s column order; a unique index does not count. The package '
+        . 'declares that constraint when the referenced table is created or rebuilt through a schema comparison, '
+        . 'so create both tables in one migration or let the comparator rebuild the referenced table.';
+
     public function convert(Exception $exception, Query|null $query): DriverException
     {
         $message = $exception->getMessage();
@@ -165,6 +170,13 @@ final class ExceptionConverter implements ExceptionConverterInterface
 
         if (str_contains($message, 'Ambiguous reference to column name')) {
             return new NonUniqueFieldNameException($exception, $query);
+        }
+
+        if (
+            str_contains($message, 'Failed to create foreign key:')
+            && str_contains($message, 'primary key or unique constraint')
+        ) {
+            return new DriverException(self::explain($exception, self::FOREIGN_KEY_TARGET_EXPLANATION), $query);
         }
 
         return new DriverException($exception, $query);

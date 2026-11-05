@@ -312,6 +312,21 @@ final class ExceptionConverterTest extends FunctionalTestCase
         );
     }
 
+    public function testForeignKeyToAColumnWithOnlyAUniqueIndexExplainsTheLimitation(): void
+    {
+        $connection = self::connect();
+        $connection->executeStatement('CREATE TABLE articles (id INTEGER PRIMARY KEY, sku VARCHAR)');
+        $connection->executeStatement('CREATE UNIQUE INDEX articles_sku ON articles (sku)');
+
+        try {
+            $connection->executeStatement('CREATE TABLE orders (id INTEGER, sku VARCHAR REFERENCES articles (sku))');
+            self::fail('DuckDB must refuse a foreign key to a column with only a unique index.');
+        } catch (DriverException $e) {
+            self::assertStringContainsString('does not have a primary key or unique constraint', $e->getMessage());
+            self::assertStringContainsString('a unique index does not count', $e->getMessage());
+        }
+    }
+
     /** @return iterable<string, array{string, string}> */
     public static function writeWriteConflicts(): iterable
     {
