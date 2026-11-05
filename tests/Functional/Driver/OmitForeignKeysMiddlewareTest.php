@@ -54,7 +54,7 @@ final class OmitForeignKeysMiddlewareTest extends FunctionalTestCase
         $connection = DriverManager::getConnection(
             [
                 'driverClass' => Driver::class,
-                'dbname' => sys_get_temp_dir() . '/dbal-duckdb-missing-directory/never-created.duckdb',
+                'dbname' => sys_get_temp_dir() . '/doctrine-duckdb-driver-missing-directory/never-created.duckdb',
             ],
             (new Configuration())->setMiddlewares([new OmitForeignKeys()]),
         );

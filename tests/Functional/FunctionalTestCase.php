@@ -35,7 +35,7 @@ abstract class FunctionalTestCase extends TestCase
     /** A path for a new database file, deleted with its write-ahead log after the test. */
     protected function temporaryDatabasePath(): string
     {
-        $path = sys_get_temp_dir() . '/dbal-duckdb-' . bin2hex(random_bytes(6)) . '.duckdb';
+        $path = sys_get_temp_dir() . '/doctrine-duckdb-driver-' . bin2hex(random_bytes(6)) . '.duckdb';
 
         $this->temporaryFiles[] = $path;
         $this->temporaryFiles[] = $path . '.wal';

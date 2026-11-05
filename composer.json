@@ -1,5 +1,5 @@
 {
-    "name": "martin-juul/dbal-duckdb",
+    "name": "martin-juul/doctrine-duckdb-driver",
     "description": "Doctrine DBAL driver and platform for DuckDB through the native ext-duckdb extension",
     "type": "library",
     "license": "MIT",

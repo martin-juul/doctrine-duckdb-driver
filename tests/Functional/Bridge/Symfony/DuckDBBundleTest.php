@@ -47,7 +47,7 @@ final class DuckDBBundleTest extends TestCase
     #[Before]
     protected function createDirectory(): void
     {
-        $this->directory = sys_get_temp_dir() . '/dbal-duckdb-bundle-' . bin2hex(random_bytes(6));
+        $this->directory = sys_get_temp_dir() . '/doctrine-duckdb-driver-bundle-' . bin2hex(random_bytes(6));
 
         (new Filesystem())->mkdir($this->directory);
     }

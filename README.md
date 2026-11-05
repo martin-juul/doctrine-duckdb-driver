@@ -1,4 +1,4 @@
-# martin-juul/dbal-duckdb
+# martin-juul/doctrine-duckdb-driver
 
 A Doctrine DBAL 4 driver, platform and schema manager for [DuckDB](https://duckdb.org) 2.0, built on the native [ext-duckdb](https://github.com/martin-juul/php-duckdb) extension. It lets DBAL, Doctrine ORM, Doctrine Migrations and Symfony's DoctrineBundle work against a DuckDB database file or an in-memory database. Where DuckDB lacks a feature that Doctrine expects, the package either emulates it or fails with an error that names the gap and the workaround.
 
@@ -17,7 +17,7 @@ A Doctrine DBAL 4 driver, platform and schema manager for [DuckDB](https://duckd
 Install ext-duckdb first. See the [php-duckdb README](https://github.com/martin-juul/php-duckdb) for PIE and source builds. Then add the package:
 
 ```sh
-composer require martin-juul/dbal-duckdb
+composer require martin-juul/doctrine-duckdb-driver
 ```
 
 ## Quick start with DBAL

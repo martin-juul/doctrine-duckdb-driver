@@ -199,14 +199,14 @@ function installDependencies(string $directory, string $root, string $suite, str
             'url'     => relativePath($directory, $root),
             'options' => [
                 'symlink'  => true,
-                'versions' => ['martin-juul/dbal-duckdb' => '1.0.x-dev'],
+                'versions' => ['martin-juul/doctrine-duckdb-driver' => '1.0.x-dev'],
             ],
         ],
     ];
 
     $requireDev = is_array($composer['require-dev'] ?? null) ? $composer['require-dev'] : [];
 
-    $requireDev['martin-juul/dbal-duckdb'] = '1.0.x-dev';
+    $requireDev['martin-juul/doctrine-duckdb-driver'] = '1.0.x-dev';
 
     if ($suite === 'orm') {
         $requireDev['doctrine/dbal'] = $isBranch($dbal) ? $dbal . '-dev' : $dbal;
@@ -244,7 +244,7 @@ function installDependencies(string $directory, string $root, string $suite, str
 
     // Composer keeps an installed path package whose version did not change,
     // even when the repository path moved, so the symlink is recreated.
-    removeDirectory($directory . '/vendor/martin-juul/dbal-duckdb');
+    removeDirectory($directory . '/vendor/martin-juul/doctrine-duckdb-driver');
 
     $environment = [
         'COMPOSER'              => 'composer.duckdb.json',

@@ -140,7 +140,7 @@ final class SelfReferencingRebuildTest extends FunctionalTestCase
         $this->open(false);
         $this->createTree();
 
-        $directory = sys_get_temp_dir() . '/dbal-duckdb-migrations-' . uniqid();
+        $directory = sys_get_temp_dir() . '/doctrine-duckdb-driver-migrations-' . uniqid();
         mkdir($directory);
 
         try {

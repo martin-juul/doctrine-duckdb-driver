@@ -1,6 +1,6 @@
 {
-    "name": "martin-juul/dbal-duckdb-symfony-smoke",
-    "description": "Symfony application that exercises martin-juul/dbal-duckdb end to end",
+    "name": "martin-juul/doctrine-duckdb-driver-symfony-smoke",
+    "description": "Symfony application that exercises martin-juul/doctrine-duckdb-driver end to end",
     "type": "project",
     "license": "MIT",
     "require": {
@@ -9,7 +9,7 @@
         "doctrine/doctrine-bundle": "^3.3",
         "doctrine/doctrine-migrations-bundle": "^3.4",
         "doctrine/orm": "^3.7",
-        "martin-juul/dbal-duckdb": "dev-smoke",
+        "martin-juul/doctrine-duckdb-driver": "dev-smoke",
         "symfony/console": "^7.3",
         "symfony/dotenv": "^7.3",
         "symfony/framework-bundle": "^7.3",
@@ -22,7 +22,7 @@
             "options": {
                 "symlink": true,
                 "versions": {
-                    "martin-juul/dbal-duckdb": "dev-smoke"
+                    "martin-juul/doctrine-duckdb-driver": "dev-smoke"
                 }
             }
         }
