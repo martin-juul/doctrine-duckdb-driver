@@ -4,6 +4,11 @@
     "type": "library",
     "license": "MIT",
     "keywords": ["duckdb", "doctrine", "dbal", "orm", "driver", "analytics"],
+    "homepage": "https://github.com/martin-juul/doctrine-duckdb-driver",
+    "support": {
+        "issues": "https://github.com/martin-juul/doctrine-duckdb-driver/issues",
+        "source": "https://github.com/martin-juul/doctrine-duckdb-driver"
+    },
     "authors": [
         {
             "name": "Martin Juul Christiansen",
