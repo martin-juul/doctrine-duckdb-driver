@@ -5,14 +5,17 @@ declare(strict_types=1);
 namespace MartinJuul\DBAL\DuckDB\Tests\Functional\Platform;
 
 use Doctrine\DBAL\Connection;
+use Doctrine\DBAL\Exception\ForeignKeyConstraintViolationException;
 use Doctrine\DBAL\Platforms\Exception\NotSupported;
 use Doctrine\DBAL\Platforms\TrimMode;
 use Doctrine\DBAL\Schema\Column;
 use Doctrine\DBAL\Schema\ForeignKeyConstraint;
+use Doctrine\DBAL\Schema\ForeignKeyConstraint\ReferentialAction;
 use Doctrine\DBAL\Schema\Index;
 use Doctrine\DBAL\Schema\Index\IndexType;
 use Doctrine\DBAL\Schema\PrimaryKeyConstraint;
 use Doctrine\DBAL\Schema\Schema;
+use Doctrine\DBAL\Schema\SchemaDiff;
 use Doctrine\DBAL\Schema\Sequence;
 use Doctrine\DBAL\Schema\Table;
 use Doctrine\DBAL\Schema\UniqueConstraint;
@@ -326,6 +329,142 @@ final class GeneratedSqlTest extends FunctionalTestCase
         );
     }
 
+    /** R13: the cascading key is left out, the other key is enforced, and the declared schema re-diffs empty. */
+    public function testForeignKeyWithAnUnenforceableActionIsOmittedWhileOthersAreEnforced(): void
+    {
+        $child = self::table(
+            'child',
+            ['id', 'parent_id', 'other_id'],
+            ['id'],
+            foreignKeys: [
+                self::foreignKey('fk_child_parent', 'parent_id', 'parent', 'id')
+                    ->edit()
+                    ->setOnDeleteAction(ReferentialAction::CASCADE)
+                    ->create(),
+                self::foreignKey('fk_child_other', 'other_id', 'other', 'id'),
+            ],
+        );
+
+        $schema = self::declaredSchema(self::parent(), self::table('other', ['id'], ['id']), $child);
+
+        $this->executeAll($this->platform->getCreateTablesSQL($schema->getTables()));
+
+        $this->connection->executeStatement('INSERT INTO other (id) VALUES (1)');
+        $this->connection->executeStatement('INSERT INTO child (id, parent_id, other_id) VALUES (1, 99, 1)');
+
+        try {
+            $this->connection->executeStatement('INSERT INTO child (id, parent_id, other_id) VALUES (2, 99, 98)');
+            self::fail('The foreign key without a referential action must be enforced');
+        } catch (ForeignKeyConstraintViolationException) {
+        }
+
+        self::assertSame(
+            ['child:FOREIGN KEY', 'child:PRIMARY KEY', 'other:PRIMARY KEY', 'parent:PRIMARY KEY'],
+            $this->constraints(),
+        );
+        self::assertTrue($this->compareWithDatabase($schema)->isEmpty());
+    }
+
+    /** R13: adding a key that generated DDL leaves out is no change, so it neither alters nor rebuilds the table. */
+    public function testAddingAForeignKeyWithAnUnenforceableActionIsNoChange(): void
+    {
+        $index = Index::editor()->setUnquotedName('idx_child_parent')->setUnquotedColumnNames('parent_id')->create();
+
+        $this->executeAll($this->platform->getCreateTablesSQL([
+            self::parent(),
+            self::table('child', ['id', 'parent_id'], ['id'], indexes: [$index]),
+        ]));
+
+        $child = self::table(
+            'child',
+            ['id', 'parent_id'],
+            ['id'],
+            indexes: [$index],
+            foreignKeys: [
+                self::foreignKey('fk_child_parent', 'parent_id', 'parent', 'id')
+                    ->edit()
+                    ->setOnDeleteAction(ReferentialAction::CASCADE)
+                    ->create(),
+            ],
+        );
+
+        $diff = $this->compareWithDatabase(self::declaredSchema(self::parent(), $child));
+
+        self::assertTrue($diff->isEmpty());
+        self::assertSame([], $this->platform->getAlterSchemaSQL($diff));
+    }
+
+    /** R13: declaring a cascade on an existing key drops the key, because generated DDL leaves it out. */
+    public function testDeclaringAnUnenforceableActionOnAnExistingKeyDropsTheKey(): void
+    {
+        $this->executeAll($this->platform->getCreateTablesSQL([self::parent(), self::child()]));
+        $this->connection->executeStatement('INSERT INTO parent (id) VALUES (1)');
+        $this->connection->executeStatement('INSERT INTO child (id, parent_id) VALUES (1, 1)');
+
+        $child = self::table(
+            'child',
+            ['id', 'parent_id'],
+            ['id'],
+            foreignKeys: [
+                self::foreignKey('fk_child_parent', 'parent_id', 'parent', 'id')
+                    ->edit()
+                    ->setOnDeleteAction(ReferentialAction::CASCADE)
+                    ->create(),
+            ],
+        );
+
+        $schema        = self::declaredSchema(self::parent(), $child);
+        $schemaManager = $this->connection->createSchemaManager();
+
+        $schemaManager->alterSchema($this->compareWithDatabase($schema));
+
+        self::assertSame(['child:PRIMARY KEY', 'parent:PRIMARY KEY'], $this->constraints());
+        self::assertSame([[1, 1]], $this->connection->fetchAllNumeric('SELECT id, parent_id FROM child'));
+        self::assertTrue($this->compareWithDatabase($schema)->isEmpty());
+    }
+
+    /**
+     * DuckDB requires a composite key's columns in the order of the referenced key, so the platform reorders
+     * the pairs; the declared order re-diffs empty against the introspected one (upstream ORM DDC2252Test).
+     */
+    public function testCompositeForeignKeyInAnotherOrderThanThePrimaryKeyCreatesAndReDiffsEmpty(): void
+    {
+        $member = self::table('member', ['uid', 'account_id'], ['uid', 'account_id']);
+
+        $privilege = self::table(
+            'privilege',
+            ['id', 'member_account_id', 'member_uid'],
+            ['id'],
+            foreignKeys: [
+                ForeignKeyConstraint::editor()
+                    ->setUnquotedName('fk_privilege_member')
+                    ->setUnquotedReferencingColumnNames('member_account_id', 'member_uid')
+                    ->setUnquotedReferencedTableName('member')
+                    ->setUnquotedReferencedColumnNames('account_id', 'uid')
+                    ->create(),
+            ],
+        );
+
+        $schema = self::declaredSchema($privilege, $member);
+
+        $this->executeAll($this->platform->getCreateTablesSQL($schema->getTables()));
+
+        $this->connection->executeStatement('INSERT INTO member (uid, account_id) VALUES (222, 111)');
+        $this->connection->executeStatement(
+            'INSERT INTO privilege (id, member_account_id, member_uid) VALUES (1, 111, 222)',
+        );
+
+        try {
+            $this->connection->executeStatement(
+                'INSERT INTO privilege (id, member_account_id, member_uid) VALUES (2, 222, 111)',
+            );
+            self::fail('The composite foreign key must be enforced pair by pair');
+        } catch (ForeignKeyConstraintViolationException) {
+        }
+
+        self::assertTrue($this->compareWithDatabase($schema)->isEmpty());
+    }
+
     public function testSelfReferencingTableCreates(): void
     {
         $category = self::table(
@@ -441,6 +580,14 @@ final class GeneratedSqlTest extends FunctionalTestCase
         }
     }
 
+    private function compareWithDatabase(Schema $schema): SchemaDiff
+    {
+        $schemaManager = $this->connection->createSchemaManager();
+        $introspected  = self::declaredSchema(...$schemaManager->introspectTables());
+
+        return $schemaManager->createComparator()->compareSchemas($introspected, $schema);
+    }
+
     /** @return list<mixed> Each constraint other than NOT NULL as "table:type", sorted. */
     private function constraints(): array
     {
@@ -448,6 +595,12 @@ final class GeneratedSqlTest extends FunctionalTestCase
             "SELECT table_name || ':' || constraint_type FROM duckdb_constraints()"
                 . " WHERE constraint_type <> 'NOT NULL' ORDER BY 1",
         );
+    }
+
+    /** A schema of the tables in DuckDB's default schema, as introspection reports it. */
+    private static function declaredSchema(Table ...$tables): Schema
+    {
+        return Schema::editor()->setDefaultNamespace('main')->setTables(...$tables)->create();
     }
 
     private static function parent(): Table

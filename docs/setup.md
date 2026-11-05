@@ -87,6 +87,7 @@ $connection = DriverManager::getConnection($params);
 | `registerTypes()` | Registers the custom DBAL types (`duckdb_list`, `duckdb_struct`, `duckdb_map`, `duckdb_hugeint`, `duckdb_interval`, `duckdb_native`). Types already registered under those names are left alone. |
 | `createDsnParser()` | Returns a DBAL `DsnParser` that maps the `duckdb` scheme to the driver. |
 | `configureOrm(Configuration $config)` | Calls `registerTypes()`, then adds an identity-generation preference that makes ORM's `AUTO` strategy use sequences on DuckDB. Preferences already set for other platforms are kept. |
+| `registerListeners(EventManager $eventManager)` | Adds the package's ORM listener, which deletes the subclass-table rows of removed JOINED-inheritance entities on DuckDB connections. |
 | `omitForeignKeys(Configuration $config)` | Appends a DBAL middleware that leaves foreign-key constraints out of generated DDL for DuckDB connections. |
 
 ### Why ORM needs `configureOrm()`
@@ -110,6 +111,7 @@ Call `registerTypes()` before you refer to the custom types by name, for example
 ### ORM
 
 ```php
+use Doctrine\Common\EventManager;
 use Doctrine\DBAL\DriverManager;
 use Doctrine\ORM\EntityManager;
 use Doctrine\ORM\ORMSetup;
@@ -121,11 +123,17 @@ $config->enableNativeLazyObjects(true);
 
 DuckDBSetup::configureOrm($config);
 
+$eventManager = new EventManager();
+
+DuckDBSetup::registerListeners($eventManager);
+
 $connection    = DriverManager::getConnection(['driverClass' => Driver::class, 'dbname' => 'var/app.duckdb'], $config);
-$entityManager = new EntityManager($connection, $config);
+$entityManager = new EntityManager($connection, $config, $eventManager);
 ```
 
 ORM's `Configuration` extends DBAL's, so passing it to `DriverManager` also applies DBAL settings such as the middleware from `omitForeignKeys()`.
+
+`registerListeners()` matters for entities mapped with JOINED inheritance. ORM deletes only the root-table row of a removed entity and relies on `ON DELETE CASCADE` foreign keys for the subclass tables, which DuckDB cannot enforce and the platform therefore leaves out (see [limitations](limitations.md#keys-with-a-referential-action-are-left-out)). The listener deletes those rows in the same flush. For an entity manager that already exists, call `DuckDBSetup::registerListeners($entityManager->getEventManager())`. The listener does nothing on connections to other databases.
 
 ### Omitting foreign keys
 
@@ -145,6 +153,7 @@ Call it before creating the connection. Generated DDL then contains no foreign k
 
 - it registers the custom types and the `duckdb` URL scheme;
 - it adds the sequence preference to every entity manager, keeping preferences configured there;
+- it registers the listener that deletes the subclass-table rows of removed JOINED-inheritance entities on every connection's event manager, so every entity manager uses it;
 - it omits foreign keys on the connections you list under `duckdb.omit_foreign_keys`.
 
 Connections to other databases are left unchanged. The bundle also works in applications that use DBAL without the ORM.

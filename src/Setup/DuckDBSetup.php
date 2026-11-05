@@ -4,12 +4,14 @@ declare(strict_types=1);
 
 namespace MartinJuul\DBAL\DuckDB\Setup;
 
+use Doctrine\Common\EventManager;
 use Doctrine\DBAL\Configuration as DBALConfiguration;
 use Doctrine\DBAL\Tools\DsnParser;
 use Doctrine\ORM\Configuration as ORMConfiguration;
 use Doctrine\ORM\Mapping\ClassMetadata;
 use MartinJuul\DBAL\DuckDB\Driver;
 use MartinJuul\DBAL\DuckDB\Driver\Middleware\OmitForeignKeys;
+use MartinJuul\DBAL\DuckDB\ORM\JoinedSubclassRowsListener;
 use MartinJuul\DBAL\DuckDB\Platform\DuckDBPlatform;
 use MartinJuul\DBAL\DuckDB\Types\TypeRegistrar;
 
@@ -49,6 +51,18 @@ final class DuckDBSetup
             [DuckDBPlatform::class => ClassMetadata::GENERATOR_TYPE_SEQUENCE],
             $configuration->getIdentityGenerationPreferences(),
         ));
+    }
+
+    /**
+     * Registers the package's ORM listeners on the event manager that an
+     * entity manager receives: {@see JoinedSubclassRowsListener}, which
+     * deletes the subclass-table rows of removed JOINED-inheritance entities
+     * on DuckDB connections. Pass the event manager to the EntityManager
+     * constructor, or call this with `$entityManager->getEventManager()`.
+     */
+    public static function registerListeners(EventManager $eventManager): void
+    {
+        $eventManager->addEventListener(JoinedSubclassRowsListener::EVENTS, new JoinedSubclassRowsListener());
     }
 
     /** Omits foreign-key constraints from the DDL generated for DuckDB connections that use the configuration. */

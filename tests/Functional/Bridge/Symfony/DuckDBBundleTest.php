@@ -14,6 +14,7 @@ use Doctrine\Persistence\ManagerRegistry;
 use MartinJuul\DBAL\DuckDB\Platform\DuckDBPlatform;
 use MartinJuul\DBAL\DuckDB\Tests\Functional\Bridge\Symfony\Fixture\Entity\Note;
 use MartinJuul\DBAL\DuckDB\Tests\Functional\Bridge\Symfony\Fixture\TestKernel;
+use MartinJuul\DBAL\DuckDB\Tests\Functional\Orm\ReferentialActionFixture\SportsCar;
 use MartinJuul\DBAL\DuckDB\Types\TypeRegistrar;
 use PHPUnit\Framework\Attributes\After;
 use PHPUnit\Framework\Attributes\Before;
@@ -217,6 +218,54 @@ final class DuckDBBundleTest extends TestCase
 
         self::assertFalse($default->omitsForeignKeys());
         self::assertTrue($analytics->omitsForeignKeys());
+    }
+
+    /** R32: every entity manager deletes the subclass rows of a removed JOINED-inheritance entity. */
+    public function testEveryEntityManagerDeletesTheSubclassRowsOfARemovedJoinedEntity(): void
+    {
+        $mappings = [
+            'ReferentialAction' => [
+                'type' => 'attribute',
+                'dir' => __DIR__ . '/../../Orm/ReferentialActionFixture',
+                'prefix' => 'MartinJuul\DBAL\DuckDB\Tests\Functional\Orm\ReferentialActionFixture',
+                'is_bundle' => false,
+            ],
+        ];
+
+        $container = $this->bootKernel([
+            'doctrine' => [
+                'dbal' => [
+                    'connections' => [
+                        'default' => ['url' => 'duckdb://localhost'],
+                        'reporting' => ['url' => 'duckdb://localhost'],
+                    ],
+                ],
+                'orm' => [
+                    'entity_managers' => [
+                        'default' => ['connection' => 'default', 'mappings' => $mappings],
+                        'reporting' => ['connection' => 'reporting', 'mappings' => $mappings],
+                    ],
+                ],
+            ],
+        ]);
+
+        foreach (['default', 'reporting'] as $name) {
+            $entityManager = self::entityManager($container, $name);
+            $connection    = $entityManager->getConnection();
+
+            (new SchemaTool($entityManager))->createSchema($entityManager->getMetadataFactory()->getAllMetadata());
+
+            $roadster = new SportsCar('Roadster', 2, 250);
+
+            $entityManager->persist($roadster);
+            $entityManager->flush();
+            $entityManager->remove($roadster);
+            $entityManager->flush();
+
+            self::assertSame(0, $connection->fetchOne('SELECT count(*) FROM vehicle'), $name);
+            self::assertSame(0, $connection->fetchOne('SELECT count(*) FROM car'), $name);
+            self::assertSame(0, $connection->fetchOne('SELECT count(*) FROM sports_car'), $name);
+        }
     }
 
     /** @param array<string, array<string, mixed>> $extensionConfigs */

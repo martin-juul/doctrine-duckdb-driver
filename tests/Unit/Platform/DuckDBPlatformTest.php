@@ -18,7 +18,6 @@ use Doctrine\DBAL\Schema\UniqueConstraint;
 use Doctrine\DBAL\TransactionIsolationLevel;
 use Doctrine\DBAL\Types\Type;
 use Doctrine\DBAL\Types\Types;
-use MartinJuul\DBAL\DuckDB\Exception\ForeignKeyActionNotSupported;
 use MartinJuul\DBAL\DuckDB\Exception\ForeignKeyCycle;
 use MartinJuul\DBAL\DuckDB\Platform\DuckDBPlatform;
 use PHPUnit\Framework\Attributes\DataProvider;
@@ -180,43 +179,183 @@ final class DuckDBPlatformTest extends TestCase
         $this->platform->getDropForeignKeySQL('fk_child_parent', 'child');
     }
 
-    /** @return iterable<string, array{string, ReferentialAction, string}> */
-    public static function rejectedReferentialActions(): iterable
+    /** @return iterable<string, array{'onDelete'|'onUpdate', ReferentialAction}> */
+    public static function unenforceableReferentialActions(): iterable
     {
-        yield 'on delete cascade' => ['onDelete', ReferentialAction::CASCADE, 'ON DELETE CASCADE'];
-        yield 'on delete set null' => ['onDelete', ReferentialAction::SET_NULL, 'ON DELETE SET NULL'];
-        yield 'on delete set default' => ['onDelete', ReferentialAction::SET_DEFAULT, 'ON DELETE SET DEFAULT'];
-        yield 'on update cascade' => ['onUpdate', ReferentialAction::CASCADE, 'ON UPDATE CASCADE'];
+        yield 'on delete cascade' => ['onDelete', ReferentialAction::CASCADE];
+        yield 'on delete set null' => ['onDelete', ReferentialAction::SET_NULL];
+        yield 'on delete set default' => ['onDelete', ReferentialAction::SET_DEFAULT];
+        yield 'on update cascade' => ['onUpdate', ReferentialAction::CASCADE];
     }
 
-    #[DataProvider('rejectedReferentialActions')]
-    public function testReferentialActionsAreRejectedNamingTableConstraintAndAction(
+    /** @param 'onDelete'|'onUpdate' $event */
+    #[DataProvider('unenforceableReferentialActions')]
+    public function testForeignKeyWithAnUnenforceableActionIsOmittedAndOthersAreKept(
         string $event,
         ReferentialAction $action,
-        string $expectedAction,
     ): void {
-        $editor = ForeignKeyConstraint::editor()
-            ->setUnquotedName('fk_child_parent')
-            ->setUnquotedReferencingColumnNames('parent_id')
-            ->setUnquotedReferencedTableName('parent')
-            ->setUnquotedReferencedColumnNames('id');
+        $child = self::table(
+            'child',
+            ['id', 'parent_id', 'other_id'],
+            ['id'],
+            foreignKeys: [
+                self::foreignKeyWithAction('fk_child_parent', 'parent_id', 'parent', 'id', $event, $action),
+                self::foreignKey('fk_child_other', 'other_id', 'other', 'id'),
+            ],
+        );
 
-        if ($event === 'onDelete') {
-            $editor->setOnDeleteAction($action);
-        } else {
-            $editor->setOnUpdateAction($action);
-        }
+        $sql = $this->platform->getCreateTablesSQL([
+            self::table('parent', ['id'], ['id']),
+            self::table('other', ['id'], ['id']),
+            $child,
+        ]);
 
-        $child = self::table('child', ['id', 'parent_id'], ['id'], foreignKeys: [$editor->create()]);
+        self::assertSame(
+            'CREATE TABLE child (id INTEGER NOT NULL, parent_id INTEGER NOT NULL, other_id INTEGER NOT NULL, '
+                . 'PRIMARY KEY (id), CONSTRAINT fk_child_other FOREIGN KEY (other_id) REFERENCES other (id))',
+            $sql[2],
+        );
+        self::assertStringNotContainsString('fk_child_parent', implode("\n", $sql));
+    }
 
-        try {
-            $this->platform->getCreateTablesSQL([self::table('parent', ['id'], ['id']), $child]);
-            self::fail('A foreign key with ' . $expectedAction . ' must be rejected');
-        } catch (ForeignKeyActionNotSupported $e) {
-            self::assertStringContainsString('"child"', $e->getMessage());
-            self::assertStringContainsString('"fk_child_parent"', $e->getMessage());
-            self::assertStringContainsString($expectedAction, $e->getMessage());
-        }
+    public function testCycleThroughAnOmittedForeignKeyIsAccepted(): void
+    {
+        $users = self::table(
+            'users',
+            ['id', 'last_post_id'],
+            ['id'],
+            foreignKeys: [self::foreignKey('fk_users_last_post', 'last_post_id', 'posts', 'id')],
+        );
+
+        $posts = self::table(
+            'posts',
+            ['id', 'author_id'],
+            ['id'],
+            foreignKeys: [
+                self::foreignKeyWithAction(
+                    'fk_posts_author',
+                    'author_id',
+                    'users',
+                    'id',
+                    'onDelete',
+                    ReferentialAction::CASCADE,
+                ),
+            ],
+        );
+
+        $sql = $this->platform->getCreateTablesSQL([$users, $posts]);
+
+        self::assertStringStartsWith('CREATE TABLE posts ', $sql[0]);
+        self::assertStringStartsWith('CREATE TABLE users ', $sql[2]);
+        self::assertStringNotContainsString('fk_posts_author', implode("\n", $sql));
+        self::assertSame(['DROP TABLE "users"', 'DROP TABLE "posts"'], $this->platform->getDropTablesSQL([$posts, $users]));
+    }
+
+    public function testColumnsReferencedOnlyByAnOmittedForeignKeyGetNoInlineUniqueConstraint(): void
+    {
+        $parent = self::table(
+            'parent',
+            ['id', 'code'],
+            ['id'],
+            indexes: [
+                Index::editor()
+                    ->setUnquotedName('uniq_parent_code')
+                    ->setType(IndexType::UNIQUE)
+                    ->setUnquotedColumnNames('code')
+                    ->create(),
+            ],
+        );
+
+        $child = self::table(
+            'child',
+            ['id', 'parent_code'],
+            ['id'],
+            foreignKeys: [
+                self::foreignKeyWithAction(
+                    'fk_child_parent',
+                    'parent_code',
+                    'parent',
+                    'code',
+                    'onDelete',
+                    ReferentialAction::SET_NULL,
+                ),
+            ],
+        );
+
+        self::assertSame(
+            [
+                'CREATE TABLE parent (id INTEGER NOT NULL, code INTEGER NOT NULL, PRIMARY KEY (id))',
+                'CREATE UNIQUE INDEX uniq_parent_code ON parent (code)',
+                'CREATE TABLE child (id INTEGER NOT NULL, parent_code INTEGER NOT NULL, PRIMARY KEY (id))',
+                'CREATE INDEX IDX_22B354294AF6062C ON child (parent_code)',
+            ],
+            $this->platform->getCreateTablesSQL([$parent, $child]),
+        );
+    }
+
+    /** A composite key's column pairs follow the order of the referenced primary key, which DuckDB requires. */
+    public function testCompositeForeignKeyFollowsTheReferencedPrimaryKeyOrder(): void
+    {
+        $member = self::table('member', ['uid', 'account_id'], ['uid', 'account_id']);
+
+        $privilege = self::table(
+            'privilege',
+            ['id', 'member_account_id', 'member_uid'],
+            ['id'],
+            foreignKeys: [
+                ForeignKeyConstraint::editor()
+                    ->setUnquotedName('fk_privilege_member')
+                    ->setUnquotedReferencingColumnNames('member_account_id', 'member_uid')
+                    ->setUnquotedReferencedTableName('member')
+                    ->setUnquotedReferencedColumnNames('account_id', 'uid')
+                    ->create(),
+            ],
+        );
+
+        $sql = $this->platform->getCreateTablesSQL([$privilege, $member]);
+
+        self::assertStringContainsString(
+            'CONSTRAINT fk_privilege_member FOREIGN KEY (member_uid, member_account_id) '
+                . 'REFERENCES member (uid, account_id)',
+            $sql[1],
+        );
+    }
+
+    /** Every foreign key to the same non-primary column set follows the order of its inline UNIQUE constraint. */
+    public function testCompositeForeignKeysFollowTheInlineUniqueConstraintOrder(): void
+    {
+        $parent = self::table(
+            'parent',
+            ['id', 'a', 'b'],
+            ['id'],
+            uniqueConstraints: [UniqueConstraint::editor()->setUnquotedColumnNames('a', 'b')->create()],
+        );
+
+        $child = self::table(
+            'child',
+            ['id', 'x', 'y'],
+            ['id'],
+            foreignKeys: [
+                ForeignKeyConstraint::editor()
+                    ->setUnquotedName('fk_child_ab')
+                    ->setUnquotedReferencingColumnNames('x', 'y')
+                    ->setUnquotedReferencedTableName('parent')
+                    ->setUnquotedReferencedColumnNames('a', 'b')
+                    ->create(),
+                ForeignKeyConstraint::editor()
+                    ->setUnquotedName('fk_child_ba')
+                    ->setUnquotedReferencingColumnNames('x', 'y')
+                    ->setUnquotedReferencedTableName('parent')
+                    ->setUnquotedReferencedColumnNames('b', 'a')
+                    ->create(),
+            ],
+        );
+
+        $sql = $this->platform->getCreateTablesSQL([$parent, $child]);
+
+        self::assertStringContainsString('UNIQUE ("a", "b")', $sql[0]);
+        self::assertStringContainsString('CONSTRAINT fk_child_ab FOREIGN KEY (x, y) REFERENCES parent (a, b)', $sql[1]);
+        self::assertStringContainsString('CONSTRAINT fk_child_ba FOREIGN KEY (y, x) REFERENCES parent (a, b)', $sql[1]);
     }
 
     public function testNoActionAndRestrictAreAccepted(): void
@@ -448,5 +587,29 @@ final class DuckDBPlatformTest extends TestCase
             ->setUnquotedReferencedTableName($referencedTable)
             ->setUnquotedReferencedColumnNames($referencedColumn)
             ->create();
+    }
+
+    /**
+     * @param non-empty-string      $name
+     * @param non-empty-string      $column
+     * @param non-empty-string      $referencedTable
+     * @param non-empty-string      $referencedColumn
+     * @param 'onDelete'|'onUpdate' $event
+     */
+    private static function foreignKeyWithAction(
+        string $name,
+        string $column,
+        string $referencedTable,
+        string $referencedColumn,
+        string $event,
+        ReferentialAction $action,
+    ): ForeignKeyConstraint {
+        $editor = self::foreignKey($name, $column, $referencedTable, $referencedColumn)->edit();
+
+        if ($event === 'onDelete') {
+            return $editor->setOnDeleteAction($action)->create();
+        }
+
+        return $editor->setOnUpdateAction($action)->create();
     }
 }

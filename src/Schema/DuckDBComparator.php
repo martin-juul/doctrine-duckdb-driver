@@ -11,6 +11,9 @@ use Doctrine\DBAL\Schema\Column;
 use Doctrine\DBAL\Schema\Comparator;
 use Doctrine\DBAL\Schema\ComparatorConfig;
 use Doctrine\DBAL\Schema\ForeignKeyConstraint;
+use Doctrine\DBAL\Schema\Index;
+use Doctrine\DBAL\Schema\Index\IndexedColumn;
+use Doctrine\DBAL\Schema\Name\UnqualifiedName;
 use Doctrine\DBAL\Schema\Schema;
 use Doctrine\DBAL\Schema\SchemaDiff;
 use Doctrine\DBAL\Schema\Table;
@@ -18,9 +21,11 @@ use Doctrine\DBAL\Schema\TableDiff;
 use MartinJuul\DBAL\DuckDB\Platform\DuckDBPlatform;
 
 use function array_keys;
+use function array_map;
 use function array_merge;
 use function array_pop;
 use function count;
+use function implode;
 use function in_array;
 use function is_array;
 use function is_string;
@@ -45,8 +50,14 @@ use function strtolower;
  * which DBAL's SchemaDiff cannot carry; the platform reads it in
  * {@see DuckDBPlatform::getAlterSchemaSQL()}.
  *
- * When the platform omits foreign keys, the comparison ignores them, so a diff
- * never proposes adding one.
+ * The comparison ignores the foreign keys that the platform leaves out of
+ * generated DDL (see {@see DuckDBPlatform::createsForeignKey()}): those with a
+ * referential action DuckDB cannot enforce, or all of them when the platform
+ * omits foreign keys. Introspection never reports such keys, so a diff never
+ * proposes adding or dropping one, and they neither cause rebuilds nor pull
+ * referencing tables into one. A composite foreign key that the platform
+ * created with its column pairs in the referenced key's order is compared in
+ * the order of the index on its columns, as it was declared.
  *
  * With a connection, each rebuild also carries the indexes on expressions of
  * its table, which DBAL cannot represent, so that the rebuild recreates them.
@@ -70,13 +81,18 @@ final class DuckDBComparator extends Comparator
     {
         $diff = parent::compareSchemas($oldSchema, $newSchema);
 
-        if ($this->platform->omitsForeignKeys()) {
-            $diff = self::withoutForeignKeyChanges($diff);
-        }
-
         $this->platform->registerRebuildPlan($diff, $this->plan($oldSchema, $newSchema, $diff));
 
         return $diff;
+    }
+
+    /**
+     * Compares the tables as generated DDL creates them; see
+     * {@see self::asCreated()}.
+     */
+    public function compareTables(Table $oldTable, Table $newTable): TableDiff
+    {
+        return parent::compareTables($this->asCreated($oldTable), $this->asCreated($newTable));
     }
 
     /**
@@ -140,17 +156,14 @@ final class DuckDBComparator extends Comparator
     /** @throws Exception */
     private function plan(Schema $oldSchema, Schema $newSchema, SchemaDiff $diff): RebuildPlan
     {
-        $omitForeignKeys = $this->platform->omitsForeignKeys();
-        $oldTables       = self::byKey($oldSchema->getTables());
-        $newTables       = self::byKey($newSchema->getTables());
-        $createdTables   = self::byKey($diff->getCreatedTables());
-        $referencedBy    = [];
+        $oldTables     = self::byKey(array_map($this->asCreated(...), $oldSchema->getTables()));
+        $newTables     = self::byKey(array_map($this->asCreated(...), $newSchema->getTables()));
+        $createdTables = self::byKey($diff->getCreatedTables());
+        $referencedBy  = [];
 
-        if (! $omitForeignKeys) {
-            foreach ($oldTables as $key => $table) {
-                foreach ($table->getForeignKeys() as $foreignKey) {
-                    $referencedBy[RebuildPlan::tableKey($foreignKey->getReferencedTableName())][$key] = true;
-                }
+        foreach ($oldTables as $key => $table) {
+            foreach ($table->getForeignKeys() as $foreignKey) {
+                $referencedBy[RebuildPlan::tableKey($foreignKey->getReferencedTableName())][$key] = true;
             }
         }
 
@@ -179,35 +192,33 @@ final class DuckDBComparator extends Comparator
             $native[$key] = $sql;
         }
 
-        if (! $omitForeignKeys) {
-            $newForeignKeys = [];
+        $newForeignKeys = [];
 
-            foreach ($createdTables as $table) {
-                $newForeignKeys = array_merge($newForeignKeys, $table->getForeignKeys());
+        foreach ($createdTables as $table) {
+            $newForeignKeys = array_merge($newForeignKeys, $table->getForeignKeys());
+        }
+
+        foreach ($diffs as $tableDiff) {
+            $newForeignKeys = array_merge(
+                $newForeignKeys,
+                $tableDiff->getAddedForeignKeys(),
+                $tableDiff->getModifiedForeignKeys(),
+            );
+        }
+
+        foreach ($this->createdForeignKeys($newForeignKeys) as $foreignKey) {
+            $parent = RebuildPlan::tableKey($foreignKey->getReferencedTableName());
+
+            if (
+                isset($createdTables[$parent])
+                || isset($rebuild[$parent])
+                || ! isset($oldTables[$parent], $newTables[$parent])
+                || $this->hasKeyConstraint($oldTables, $parent, $foreignKey, $constraints)
+            ) {
+                continue;
             }
 
-            foreach ($diffs as $tableDiff) {
-                $newForeignKeys = array_merge(
-                    $newForeignKeys,
-                    $tableDiff->getAddedForeignKeys(),
-                    $tableDiff->getModifiedForeignKeys(),
-                );
-            }
-
-            foreach ($newForeignKeys as $foreignKey) {
-                $parent = RebuildPlan::tableKey($foreignKey->getReferencedTableName());
-
-                if (
-                    isset($createdTables[$parent])
-                    || isset($rebuild[$parent])
-                    || ! isset($oldTables[$parent], $newTables[$parent])
-                    || $this->hasKeyConstraint($oldTables, $parent, $foreignKey, $constraints)
-                ) {
-                    continue;
-                }
-
-                $rebuild[$parent] = true;
-            }
+            $rebuild[$parent] = true;
         }
 
         $queue = array_keys($rebuild);
@@ -305,33 +316,159 @@ final class DuckDBComparator extends Comparator
         return $byKey;
     }
 
-    private static function withoutForeignKeyChanges(SchemaDiff $diff): SchemaDiff
+    /**
+     * The foreign keys that generated DDL creates.
+     *
+     * @param array<ForeignKeyConstraint> $foreignKeys
+     *
+     * @return list<ForeignKeyConstraint>
+     */
+    private function createdForeignKeys(array $foreignKeys): array
     {
-        $alteredTables = [];
+        $created = [];
 
-        foreach ($diff->getAlteredTables() as $tableDiff) {
-            $alteredTables[] = new TableDiff(
-                $tableDiff->getOldTable(),
-                addedColumns: $tableDiff->getAddedColumns(),
-                changedColumns: $tableDiff->getChangedColumns(),
-                droppedColumns: $tableDiff->getDroppedColumns(),
-                addedIndexes: $tableDiff->getAddedIndexes(),
-                modifiedIndexes: $tableDiff->getModifiedIndexes(),
-                droppedIndexes: $tableDiff->getDroppedIndexes(),
-                renamedIndexes: $tableDiff->getRenamedIndexes(),
-            );
+        foreach ($foreignKeys as $foreignKey) {
+            if (! $this->platform->createsForeignKey($foreignKey)) {
+                continue;
+            }
+
+            $created[] = $foreignKey;
         }
 
-        return new SchemaDiff(
-            $diff->getCreatedSchemas(),
-            $diff->getDroppedSchemas(),
-            $diff->getCreatedTables(),
-            $alteredTables,
-            $diff->getDroppedTables(),
-            $diff->getCreatedSequences(),
-            $diff->getAlteredSequences(),
-            $diff->getDroppedSequences(),
-        );
+        return $created;
+    }
+
+    /**
+     * The table as generated DDL creates it and introspection reports it.
+     *
+     * Its foreign keys lose those that generated DDL leaves out, while the
+     * indexes that backed them stay, as generated DDL creates them too.
+     *
+     * A composite foreign key whose columns another index lists in a different
+     * order takes that index's order, and the index DBAL implicitly added for
+     * the key's own order goes. The platform lists a key's columns in the
+     * order of the referenced key, which can differ from the declared order
+     * of the index backing it, so introspection reports the key in another
+     * order than that index, and DBAL then adds an index the database lacks.
+     */
+    private function asCreated(Table $table): Table
+    {
+        $foreignKeys     = [];
+        $implicitIndexes = [];
+        $changed         = false;
+
+        foreach ($table->getForeignKeys() as $foreignKey) {
+            if (! $this->platform->createsForeignKey($foreignKey)) {
+                $changed = true;
+
+                continue;
+            }
+
+            $ordered = self::inIndexOrder($foreignKey, $table);
+
+            if ($ordered !== $foreignKey) {
+                $changed = true;
+
+                $implicitIndexes[self::columnListKey($foreignKey->getReferencingColumnNames())] = true;
+            }
+
+            $foreignKeys[] = $ordered;
+        }
+
+        if (! $changed) {
+            return $table;
+        }
+
+        $explicitIndexes = $table->edit()->setForeignKeyConstraints()->create()->getIndexes();
+        $indexes         = [];
+
+        foreach ($table->getIndexes() as $name => $index) {
+            if ($index->isPrimary()) {
+                continue;
+            }
+
+            if (! isset($explicitIndexes[$name]) && isset($implicitIndexes[self::indexColumnListKey($index)])) {
+                continue;
+            }
+
+            $indexes[] = $index;
+        }
+
+        return $table->edit()
+            ->setIndexes(...$indexes)
+            ->setForeignKeyConstraints(...$foreignKeys)
+            ->create();
+    }
+
+    /**
+     * The foreign key with its column pairs in the order of another index of
+     * the table on the same referencing columns, or the key as it is when the
+     * table has no such index.
+     */
+    private static function inIndexOrder(ForeignKeyConstraint $foreignKey, Table $table): ForeignKeyConstraint
+    {
+        $referencingColumns = $foreignKey->getReferencingColumnNames();
+        $referencedColumns  = $foreignKey->getReferencedColumnNames();
+
+        if (count($referencingColumns) < 2 || count($referencingColumns) !== count($referencedColumns)) {
+            return $foreignKey;
+        }
+
+        $positions = [];
+
+        foreach ($referencingColumns as $position => $column) {
+            $positions[strtolower($column->getIdentifier()->getValue())] = $position;
+        }
+
+        $keyOrder = self::columnListKey($referencingColumns);
+
+        foreach ($table->getIndexes() as $index) {
+            $indexOrder = self::indexColumnListKey($index);
+
+            if ($index->isPrimary() || $indexOrder === $keyOrder) {
+                continue;
+            }
+
+            $order = [];
+
+            foreach ($index->getIndexedColumns() as $column) {
+                $order[] = $positions[strtolower($column->getColumnName()->getIdentifier()->getValue())] ?? null;
+            }
+
+            if (count($order) !== count($positions) || in_array(null, $order, true)) {
+                continue;
+            }
+
+            return $foreignKey->edit()
+                ->setReferencingColumnNames(...array_map(
+                    static fn (int $position): UnqualifiedName => $referencingColumns[$position],
+                    $order,
+                ))
+                ->setReferencedColumnNames(...array_map(
+                    static fn (int $position): UnqualifiedName => $referencedColumns[$position],
+                    $order,
+                ))
+                ->create();
+        }
+
+        return $foreignKey;
+    }
+
+    /** @param list<UnqualifiedName> $columns */
+    private static function columnListKey(array $columns): string
+    {
+        return implode("\0", array_map(
+            static fn (UnqualifiedName $column): string => strtolower($column->getIdentifier()->getValue()),
+            $columns,
+        ));
+    }
+
+    private static function indexColumnListKey(Index $index): string
+    {
+        return self::columnListKey(array_map(
+            static fn (IndexedColumn $column): UnqualifiedName => $column->getColumnName(),
+            $index->getIndexedColumns(),
+        ));
     }
 
     /**
