@@ -6,6 +6,7 @@ namespace MartinJuul\DBAL\DuckDB\Driver;
 
 use Doctrine\DBAL\Driver\Statement as StatementInterface;
 use Doctrine\DBAL\ParameterType;
+use DuckDB\Exception;
 use DuckDB\Statement as NativeStatement;
 use DuckDB\Value;
 use MartinJuul\DBAL\DuckDB\Driver\Exception\DriverError;
@@ -16,6 +17,8 @@ use ValueError;
 
 use function DuckDB\isValidUtf8;
 use function is_bool;
+use function is_float;
+use function is_int;
 use function is_resource;
 use function is_string;
 use function stream_get_contents;
@@ -52,6 +55,16 @@ final class Statement implements StatementInterface
                 throw DriverError::fromBinding($e);
             }
         });
+    }
+
+    /** The type DuckDB resolved for a parameter, or null when it could not tell. */
+    private function resolvedType(int|string $param): string|null
+    {
+        try {
+            return $this->statement->parameterType($param);
+        } catch (Exception | ValueError) {
+            return null;
+        }
     }
 
     private function bind(int|string $param, mixed $value, ParameterType $type): void
@@ -93,6 +106,13 @@ final class Statement implements StatementInterface
             case ParameterType::ASCII:
                 // Like PDO, a string parameter binds an object's string form; typed values bind unchanged (KTD6).
                 if ($value instanceof Stringable && ! $value instanceof Value) {
+                    $value = (string) $value;
+                }
+
+                // DBAL binds untyped parameters as STRING, so a PHP number stays a number unless
+                // DuckDB resolved the parameter as VARCHAR, e.g. compared with a VARCHAR column,
+                // where binding a number would cast the column to a number instead.
+                if ((is_int($value) || is_float($value)) && $this->resolvedType($param) === 'VARCHAR') {
                     $value = (string) $value;
                 }
 

@@ -77,6 +77,26 @@ final class StatementTest extends FunctionalTestCase
         yield 'ascii' => [ParameterType::ASCII];
     }
 
+    public function testNumberComparedWithAVarcharColumnBindsAsAString(): void
+    {
+        $connection = self::connect();
+        $connection->executeStatement("CREATE TABLE t (topic VARCHAR, n INTEGER); INSERT INTO t VALUES ('Test1', 5)");
+
+        self::assertSame(0, $connection->fetchOne('SELECT count(*) FROM t WHERE topic = ?', [-1], [ParameterType::STRING]));
+        self::assertSame(0, $connection->fetchOne('SELECT count(*) FROM t WHERE topic = ?', [1.5], [ParameterType::STRING]));
+    }
+
+    public function testUntypedNumbersStillBindAsNumbersInArithmetic(): void
+    {
+        $connection = self::connect();
+        $connection->executeStatement('CREATE TABLE t (n INTEGER); INSERT INTO t VALUES (5)');
+
+        self::assertSame(6, $connection->fetchOne('SELECT ? + 1', [5]));
+        self::assertSame(5, $connection->fetchOne('SELECT abs(?)', [-5]));
+        self::assertSame(10, $connection->fetchOne('SELECT n + ? FROM t', [5]));
+        self::assertSame(1, $connection->fetchOne('SELECT count(*) FROM t WHERE n = ?', [5]));
+    }
+
     #[DataProvider('stringParameterTypes')]
     public function testStringableObjectBindsAsItsString(ParameterType $type): void
     {
