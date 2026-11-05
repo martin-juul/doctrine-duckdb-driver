@@ -105,6 +105,7 @@ A DBAL column declared `autoincrement` gets a sequence named `<table>_<column>__
 - DuckDB cannot rename sequences. Renaming the table keeps the sequence's old name; it still belongs to the table.
 - Dropping the table through a schema diff or the schema manager's `dropTable()` drops the sequence too.
 - A plain `DROP TABLE`, including the one in the `down()` that Doctrine Migrations generates, leaves the sequence behind. Add `DROP SEQUENCE <table>_<column>__autoinc` after it.
+- Making an existing column `autoincrement` rebuilds the table. The new sequence continues after the column's highest value, which the rebuild reads when it runs, not when `migrations:diff` generates the SQL. An empty table starts at 1.
 
 ORM entities with a default generated ID use their own sequence, `<table>_<column>_seq`, once the setup is applied.
 
@@ -185,7 +186,7 @@ Workarounds:
 
 DuckDB 2.0's `ALTER TABLE` can add a nullable column or one with a default, change or drop a default, and change comments on any table. Other changes, such as setting `NOT NULL`, changing a type or dropping a column, work in place only on tables with no index that no foreign key references. Renames, removing `NOT NULL`, autoincrement and `CHECK` changes, and every foreign-key change always need a rebuild.
 
-For those changes the generated SQL rebuilds the table, and every table that references it: it copies each table into a staging table with explicit column lists, drops the originals, creates the new tables with their owned sequences, copies the rows back column by column, and recreates indexes and comments. IDs continue where they left off.
+For those changes the generated SQL rebuilds the table, and every table that references it: it copies each table into a staging table with explicit column lists, drops the originals, creates the new tables with their owned sequences, `CHECK` constraints and collations, copies the rows back column by column, and recreates indexes and comments. IDs continue where they left off.
 
 - **Memory:** a rebuild holds roughly two copies of the rebuilt tables in memory until it commits. With a low `memory_limit` it fails at commit with the data intact. Raise `memory_limit` in `driverOptions` before rebuilding large tables.
 - **Atomicity:** the rebuild runs in the migration's transaction or in the caller's. Without one (for example `doctrine:schema:update --force`), the driver opens a transaction for it. A failure at any point leaves the original tables and rows in place.
@@ -215,14 +216,36 @@ Workaround: widen the filter for the migration, or apply the change by hand.
 
 ### Tables with generated columns cannot be rebuilt
 
-DuckDB reports a generated column like a plain column with a default, so a rebuild would turn it into one. A rebuild of such a table fails with `NotSupported`: "Cannot rebuild table …: its column … is a generated column, …".
+DuckDB reports a generated column like a plain column with a default, so a rebuild would turn it into one. A rebuild of such a table fails with `NotSupported`: "Cannot rebuild table …: its column … is a generated column, …". Schema comparisons, the schema manager's `alterSchema()`, `alterTable()` and `renameTable()`, and `RebuildTables::queue()` refuse it before anything runs. SQL from `getAlterTableSQL()` fails when it runs; see [rebuilds without a connection](#rebuilds-without-a-connection).
 
 Workaround: change these tables with hand-written SQL.
+
+### `CHECK` constraints and collations in a rebuild
+
+DBAL represents only the `CHECK` constraints that declare a column's minimum or maximum value, such as `CHECK (qty >= 0)`, and introspection does not report column collations, such as `COLLATE NOCASE`. A rebuild reads the other `CHECK` constraints, including table-level ones such as `CHECK (lo < hi)`, and the collations from DuckDB's catalog and declares them on the new table. This covers the tables a change rebuilds and the tables a rebuild pulls in because they reference one. Introspection still does not show them, so schema comparisons neither add nor drop them.
+
+- **Renamed columns:** a `CHECK` constraint that uses a renamed column is rewritten to use the new name. A collation moves with its column.
+- **Dropped columns:** a `CHECK` constraint whose columns the change all drops is dropped with them, as DuckDB's `ALTER TABLE … DROP COLUMN` does.
+
+The rebuild fails with `NotSupported`, before anything runs, when it cannot keep one of them:
+
+- **A `CHECK` constraint uses a dropped column and a kept one:** "Cannot rebuild table …: its CHECK constraint …, CHECK (…), uses column …, which this change drops, together with columns it keeps." DuckDB refuses to drop such a column too.
+- **A rename cannot be applied reliably:** "… uses a column that this change renames, and the new name cannot be applied to the expression reliably." This happens when the expression also uses a struct field of the column's name, such as `s.status`.
+- **A collated column gets a type without collations:** "Cannot rebuild table …: its column … has the collation …, which the column's new type … cannot keep." Only `VARCHAR` columns have collations.
+
+Workaround: change these tables with hand-written SQL. DuckDB cannot add or drop a `CHECK` constraint on an existing table, so the SQL recreates the table.
+
+### Rebuilds without a connection
+
+`AbstractPlatform::getAlterTableSQL()`, and `getAlterSchemaSQL()` with a diff from DBAL's own comparator rather than the schema manager's, have no connection, so they cannot read DuckDB's catalog. A rebuild they generate begins with a check that fails when the table has a generated column, a `CHECK` constraint other than a column's minimum or maximum value, or a collated column: "Cannot rebuild table … without reading DuckDB's catalog: it has a generated column, a CHECK constraint or a collation that DBAL cannot represent, which the rebuild would lose. …". The check runs when the SQL runs, and the transaction rolls back.
+
+Workaround: apply the change through the schema manager (`alterSchema()`, `migrateSchema()` or `alterTable()`) or a diff from its comparator, which Migrations and `schema:update` use.
 
 ### What a rebuild does not keep
 
 - **Named `ENUM` types:** a column of a named `ENUM` type (`CREATE TYPE mood AS ENUM (…)`) comes back as an anonymous `ENUM` with the same values.
 - **Indexes on expressions, when the SQL comes from `getAlterTableSQL()`:** introspection skips indexes on expressions, such as `CREATE INDEX … ON t (lower(email))`, because DBAL cannot represent them. The rebuild reads them from DuckDB's catalog instead, which needs the connection. Schema diffs from the schema manager's comparator, the schema manager's `alterTable()`, `alterSchema()` and `renameTable()`, and `RebuildTables::queue()` keep them. `AbstractPlatform::getAlterTableSQL()` has no connection, so a rebuild it generates drops them. Recreate them in the same migration after the rebuild.
+- **`CHECK` constraints and collations, when the SQL comes from `getAlterTableSQL()`:** they also come from the catalog. A rebuild without a connection does not drop them silently; it fails when it runs (see [rebuilds without a connection](#rebuilds-without-a-connection)).
 
 ### Partial and expression indexes
 
@@ -249,7 +272,7 @@ A rebuild recreates an expression index under its name, on the rebuilt or rename
 
 DuckDB neither enforces nor reports string and binary lengths. The platform declares `string` columns as `VARCHAR` and `binary` columns as `BLOB`, whatever their `length`, and introspection reports no length. A value longer than the mapped length is stored in full.
 
-Workaround: validate lengths in the application, or add a `CHECK (length(col) <= n)` constraint with SQL.
+Workaround: validate lengths in the application, or add a `CHECK (length(col) <= n)` constraint with SQL. Table rebuilds keep such a constraint (see [`CHECK` constraints and collations in a rebuild](#check-constraints-and-collations-in-a-rebuild)).
 
 ### Invalid UTF-8 is rejected
 

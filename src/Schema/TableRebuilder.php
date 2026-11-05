@@ -16,6 +16,7 @@ use Doctrine\DBAL\Schema\Name\UnqualifiedName;
 use Doctrine\DBAL\Schema\SchemaDiff;
 use Doctrine\DBAL\Schema\Table;
 use Doctrine\DBAL\Schema\TableDiff;
+use Doctrine\DBAL\Types\Type;
 use MartinJuul\DBAL\DuckDB\Driver\StatementClassifier;
 use MartinJuul\DBAL\DuckDB\Migrations\RebuildTables;
 use MartinJuul\DBAL\DuckDB\Platform\DuckDBPlatform;
@@ -23,6 +24,7 @@ use MartinJuul\DBAL\DuckDB\Platform\DuckDBPlatform;
 use function array_diff_key;
 use function array_flip;
 use function array_key_exists;
+use function array_key_first;
 use function array_keys;
 use function array_map;
 use function array_merge;
@@ -30,18 +32,22 @@ use function array_reverse;
 use function count;
 use function implode;
 use function is_numeric;
+use function preg_match;
 use function preg_match_all;
 use function rtrim;
 use function spl_object_id;
 use function sprintf;
+use function str_ends_with;
 use function str_replace;
 use function str_starts_with;
 use function strcasecmp;
+use function stripos;
 use function strlen;
 use function strpos;
 use function strtolower;
 use function substr;
 
+use const PREG_OFFSET_CAPTURE;
 use const PREG_SET_ORDER;
 use const PREG_UNMATCHED_AS_NULL;
 
@@ -65,6 +71,20 @@ use const PREG_UNMATCHED_AS_NULL;
  * 5. drops the staging tables, then recreates indexes and comments, and the
  *    indexes on expressions that the rebuild entries carry.
  *
+ * The new tables also declare the CHECK constraints and column collations
+ * that the rebuild entries carry from DuckDB's catalog. A CHECK constraint on
+ * a renamed column is rewritten to the new name; one whose columns are all
+ * dropped goes with them, as DuckDB's DROP COLUMN does. A CHECK constraint
+ * that uses a dropped column together with a kept one, a rename the rewrite
+ * cannot apply reliably, and a collated column whose new type cannot keep its
+ * collation are refused. A rebuild entry that was built without reading the
+ * catalog begins with a check that fails while its table has a generated
+ * column, a CHECK constraint or a collation that the rebuild would lose.
+ *
+ * An autoincrement column whose values come from a column that was not one
+ * gets a new owned sequence, which the rebuild moves past the copied values
+ * when it runs.
+ *
  * An index on expressions that uses a column the rebuild renames or drops is
  * not recreated. Instead, the rebuild begins with a check that fails, naming
  * the index, while the index exists, so a migration can drop it before the
@@ -82,6 +102,7 @@ use const PREG_UNMATCHED_AS_NULL;
  *
  * @internal
  *
+ * @phpstan-import-type CatalogCheck from RebuildPlan
  * @phpstan-import-type ExpressionIndex from RebuildPlan
  * @phpstan-import-type Rebuild from RebuildPlan
  * @phpstan-type Step array{sql: string, levels: array{table: string, depth: string}|null}
@@ -89,6 +110,16 @@ use const PREG_UNMATCHED_AS_NULL;
 final class TableRebuilder
 {
     private const string STAGE_SUFFIX = '__stage';
+
+    /**
+     * The tokens of an SQL expression as DuckDB's catalog reports it: a
+     * string literal, a quoted identifier (group 1), or a bare identifier
+     * that is not followed by a parenthesis (group 2).
+     */
+    private const string TOKENS = '/\'(?:[^\']|\'\')*\'|"((?:[^"]|"")+)"|(?<![A-Za-z0-9_$])([A-Za-z_][A-Za-z0-9_$]*+)(?!\s*\()/';
+
+    /** The type declarations that DuckDB stores as VARCHAR, the only type with a collation. */
+    private const string STRING_TYPE = '/^(?:VARCHAR|TEXT|STRING|CHAR|BPCHAR|NVARCHAR)(?:\s*\(\s*\d+\s*\))?$/i';
 
     /** The keys of a column's properties in {@see Column::toArray()}; any other key is a platform option. */
     private const array COLUMN_PROPERTIES = [
@@ -114,7 +145,8 @@ final class TableRebuilder
     /**
      * The steps of a schema diff, routed by the plan the comparator
      * registered for it, or table by table when there is none; then a
-     * connection, when given, supplies the indexes on expressions.
+     * connection, when given, supplies what DBAL cannot represent of the
+     * rebuilt tables and refuses tables with generated columns.
      *
      * @return list<Step>
      *
@@ -125,7 +157,7 @@ final class TableRebuilder
         $plan = $this->platform->getRebuildPlan($diff);
 
         if ($plan === null) {
-            $plan = $this->withExpressionIndexes(
+            $plan = $this->withCatalogDetails(
                 (new AlterRouting($this->platform))->plan($diff->getAlteredTables()),
                 $connection,
             );
@@ -176,8 +208,9 @@ final class TableRebuilder
 
     /**
      * The steps of a single table diff, without the context of a comparison:
-     * a rebuild covers only this table, and keeps its indexes on expressions
-     * only when a connection is given to read them.
+     * a rebuild covers only this table. Only when a connection is given to
+     * read DuckDB's catalog does it keep the indexes on expressions, CHECK
+     * constraints and collations, and refuse a table with generated columns.
      *
      * @return list<Step>
      *
@@ -185,7 +218,7 @@ final class TableRebuilder
      */
     public function tableDiffSteps(TableDiff $diff, Connection|null $connection = null): array
     {
-        $plan  = $this->withExpressionIndexes((new AlterRouting($this->platform))->plan([$diff]), $connection);
+        $plan  = $this->withCatalogDetails((new AlterRouting($this->platform))->plan([$diff]), $connection);
         $steps = [];
 
         foreach ($plan->nativeSQL as $statements) {
@@ -297,16 +330,30 @@ final class TableRebuilder
         return $sql;
     }
 
-    /** @throws Exception */
-    private function withExpressionIndexes(RebuildPlan $plan, Connection|null $connection): RebuildPlan
+    /**
+     * The plan with each rebuild carrying what DBAL cannot represent of its
+     * table, after refusing tables with generated columns, as the comparator
+     * does.
+     *
+     * @throws Exception
+     */
+    private function withCatalogDetails(RebuildPlan $plan, Connection|null $connection): RebuildPlan
     {
-        if ($connection === null) {
+        if ($connection === null || count($plan->rebuilds) === 0) {
             return $plan;
         }
 
+        $old = [];
+
+        foreach ($plan->rebuilds as $key => $rebuild) {
+            $old[$key] = $rebuild['old'];
+        }
+
+        DuckDBComparator::assertNoGeneratedColumns($connection, $old);
+
         return new RebuildPlan(
             $plan->nativeSQL,
-            DuckDBComparator::withExpressionIndexes($connection, $this->platform, $plan->rebuilds),
+            DuckDBComparator::withCatalogDetails($connection, $this->platform, $plan->rebuilds),
         );
     }
 
@@ -353,6 +400,10 @@ final class TableRebuilder
         $recreate = [];
 
         foreach ($rebuilds as $key => $rebuild) {
+            if (! $rebuild['catalogRead']) {
+                $steps[] = $this->unreadCatalogCheck($rebuild['old']);
+            }
+
             foreach ($rebuild['expressionIndexes'] as $index) {
                 $column = self::lostColumn($rebuild, $index['sql']);
 
@@ -366,8 +417,14 @@ final class TableRebuilder
             }
         }
 
+        $checks = [];
+
         foreach ($rebuilds as $key => $rebuild) {
-            [$new[$key], $tableReused, $tableOrphaned] = $this->keepOwnedSequences($rebuild);
+            [$table, $tableReused, $tableOrphaned] = $this->keepOwnedSequences($rebuild);
+
+            $new[$key] = $this->withCollations($rebuild, $table);
+
+            $checks[RebuildPlan::tableKey($table->getObjectName())] = $this->carriedChecks($rebuild);
 
             $reused   = array_merge($reused, $tableReused);
             $orphaned = array_merge($orphaned, $tableOrphaned);
@@ -432,7 +489,7 @@ final class TableRebuilder
         $order    = [];
         $current  = null;
 
-        foreach ($this->platform->createTablesSQL($toCreate, $omittedForeignKeys) as $sql) {
+        foreach ($this->platform->createTablesSQL($toCreate, $omittedForeignKeys, $checks) as $sql) {
             if (str_starts_with($sql, 'CREATE SEQUENCE ')) {
                 if (! isset($reused[$sql])) {
                     $steps[] = self::step($sql);
@@ -464,6 +521,10 @@ final class TableRebuilder
 
         foreach ($order as $key) {
             $steps = array_merge($steps, $this->copySteps($rebuilds[$key], $new[$key]));
+        }
+
+        foreach ($order as $key) {
+            $steps = array_merge($steps, $this->sequenceStartSteps($rebuilds[$key], $new[$key]));
         }
 
         foreach ($order as $key) {
@@ -554,6 +615,364 @@ final class TableRebuilder
         }
 
         return [$rebuild['new']->edit()->setColumns(...$columns)->create(), $reused, $orphaned];
+    }
+
+    /**
+     * Moves the new owned sequence of each autoincrement column whose values
+     * come from a column that was not one past the copied values, so that
+     * inserts without a value do not repeat them. The statements compute the
+     * start when they run, not when they are generated.
+     *
+     * @param Rebuild $rebuild
+     *
+     * @return list<Step>
+     */
+    private function sequenceStartSteps(array $rebuild, Table $new): array
+    {
+        $columns = [];
+
+        foreach ($new->getColumns() as $column) {
+            $columns[RebuildPlan::columnKey($column)] = $column;
+        }
+
+        $target = $new->getObjectName()->toSQL($this->platform);
+        $steps  = [];
+
+        foreach ($rebuild['columns'] as [$oldColumn, $newColumn]) {
+            $column = $columns[RebuildPlan::columnKey($newColumn)] ?? null;
+
+            if ($column === null || ! $column->getAutoincrement() || $oldColumn->getAutoincrement()) {
+                continue;
+            }
+
+            $sequence = $this->platform->getOwnedSequenceName($new->getObjectName(), $column)->toSQL($this->platform);
+
+            $steps[] = self::step(sprintf(
+                'SELECT setval(%s, max_value) FROM (SELECT max(%s) AS max_value FROM %s) WHERE max_value >= 1',
+                $this->platform->quoteStringLiteral($sequence),
+                $this->name($column),
+                $target,
+            ));
+        }
+
+        return $steps;
+    }
+
+    /**
+     * The expressions of the CHECK constraints that the rebuild carries over,
+     * with renamed columns under their new names. A constraint whose columns
+     * the change all drops goes with them.
+     *
+     * @param Rebuild $rebuild
+     *
+     * @return list<string>
+     *
+     * @throws NotSupported When a constraint uses a dropped column and a kept one, or a rename cannot be applied.
+     */
+    private function carriedChecks(array $rebuild): array
+    {
+        $oldColumns = [];
+        $kept       = [];
+        $renamed    = [];
+
+        foreach ($rebuild['old']->getColumns() as $column) {
+            $oldColumns[RebuildPlan::columnKey($column)] = true;
+        }
+
+        foreach ($rebuild['columns'] as [$oldColumn, $newColumn]) {
+            $key = RebuildPlan::columnKey($oldColumn);
+
+            $kept[$key] = true;
+
+            if ($key === RebuildPlan::columnKey($newColumn)) {
+                continue;
+            }
+
+            $renamed[$key] = $this->name($newColumn);
+        }
+
+        $expressions = [];
+
+        foreach ($rebuild['checks'] as $check) {
+            $used    = 0;
+            $dropped = [];
+            $uses    = [];
+
+            // DuckDB also lists the field of a struct column's field access, such as `s.f`, as a column.
+            foreach ($check['columns'] as $column) {
+                $key = strtolower($column);
+
+                if (! isset($oldColumns[$key])) {
+                    continue;
+                }
+
+                $used++;
+
+                if (! isset($kept[$key])) {
+                    $dropped[$key] = $column;
+
+                    continue;
+                }
+
+                if (! isset($renamed[$key])) {
+                    continue;
+                }
+
+                $uses[$key] = true;
+            }
+
+            if (count($dropped) > 0) {
+                $reason = 'together with columns it keeps';
+
+                if (count($dropped) === $used) {
+                    $reason = null;
+
+                    foreach (self::nameOccurrences($check['expression'], $dropped) as $occurrence) {
+                        if (! $occurrence['field']) {
+                            continue;
+                        }
+
+                        $reason = 'or a struct field of the same name';
+
+                        break;
+                    }
+                }
+
+                if ($reason === null) {
+                    continue;
+                }
+
+                throw new NotSupported(sprintf(
+                    'Cannot rebuild table %s: its CHECK constraint %s, CHECK (%s), uses column %s, which this change '
+                        . 'drops, %s. Change the table with hand-written SQL.',
+                    $rebuild['old']->getObjectName()->toString(),
+                    $check['name'],
+                    $check['expression'],
+                    $dropped[array_key_first($dropped)],
+                    $reason,
+                ));
+            }
+
+            $expression = $check['expression'];
+
+            if (count($uses) > 0) {
+                $expression = self::renameColumns($expression, $renamed, $uses);
+            }
+
+            if ($expression === null) {
+                throw new NotSupported(sprintf(
+                    'Cannot rebuild table %s: its CHECK constraint %s, CHECK (%s), uses a column that this change '
+                        . 'renames, and the new name cannot be applied to the expression reliably. Change the table '
+                        . 'with hand-written SQL.',
+                    $rebuild['old']->getObjectName()->toString(),
+                    $check['name'],
+                    $check['expression'],
+                ));
+            }
+
+            $expressions[] = $expression;
+        }
+
+        return $expressions;
+    }
+
+    /**
+     * The expression with each renamed column that it uses under its new
+     * name, or null when that cannot be done reliably: when a renamed name
+     * appears after a period, where it may name a field, or when the
+     * identifiers replaced are not exactly the used columns that DuckDB's
+     * catalog reports. A name after AS is a cast's type and stays.
+     *
+     * @param array<string, string> $renamed The new names as SQL, keyed by the old names in lower case.
+     * @param array<string, true>   $uses    The renamed columns that the expression uses, in lower case.
+     */
+    private static function renameColumns(string $expression, array $renamed, array $uses): string|null
+    {
+        $result   = '';
+        $offset   = 0;
+        $replaced = [];
+
+        foreach (self::nameOccurrences($expression, $renamed) as $occurrence) {
+            if ($occurrence['field'] || ! isset($uses[$occurrence['key']])) {
+                return null;
+            }
+
+            $result .= substr($expression, $offset, $occurrence['start'] - $offset) . $renamed[$occurrence['key']];
+            $offset  = $occurrence['start'] + $occurrence['length'];
+
+            $replaced[$occurrence['key']] = true;
+        }
+
+        if (count($replaced) !== count($uses)) {
+            return null;
+        }
+
+        return $result . substr($expression, $offset);
+    }
+
+    /**
+     * Where the given names appear in the expression as identifiers, except
+     * after AS, as the type of a cast. `field` marks an occurrence after a
+     * period, which may name a struct field rather than a column.
+     *
+     * @param array<string, mixed> $names Keyed by the names in lower case.
+     *
+     * @return list<array{key: string, start: int, length: int, field: bool}>
+     */
+    private static function nameOccurrences(string $expression, array $names): array
+    {
+        preg_match_all(
+            self::TOKENS,
+            $expression,
+            $matches,
+            PREG_SET_ORDER | PREG_OFFSET_CAPTURE | PREG_UNMATCHED_AS_NULL,
+        );
+
+        $occurrences = [];
+
+        foreach ($matches as $match) {
+            $name = $match[1][0] ?? null;
+            $name = $name === null ? $match[2][0] ?? null : str_replace('""', '"', $name);
+
+            if ($name === null || ! isset($names[strtolower($name)])) {
+                continue;
+            }
+
+            $start  = $match[0][1];
+            $before = rtrim(substr($expression, 0, $start));
+
+            if (preg_match('/(?<![A-Za-z0-9_$])AS$/i', $before) === 1) {
+                continue;
+            }
+
+            $occurrences[] = [
+                'key' => strtolower($name),
+                'start' => $start,
+                'length' => strlen((string) $match[0][0]),
+                'field' => str_ends_with($before, '.'),
+            ];
+        }
+
+        return $occurrences;
+    }
+
+    /**
+     * The new table with each column whose values come from a collated column
+     * declaring that collation.
+     *
+     * @param Rebuild $rebuild
+     *
+     * @throws NotSupported When the new type of a collated column cannot keep its collation.
+     */
+    private function withCollations(array $rebuild, Table $table): Table
+    {
+        $collations = [];
+
+        foreach ($rebuild['columns'] as [$oldColumn, $newColumn]) {
+            $collation = $rebuild['collations'][RebuildPlan::columnKey($oldColumn)] ?? null;
+
+            if ($collation === null) {
+                continue;
+            }
+
+            $collations[RebuildPlan::columnKey($newColumn)] = $collation;
+        }
+
+        if (count($collations) === 0) {
+            return $table;
+        }
+
+        $columns = [];
+
+        foreach ($table->getColumns() as $column) {
+            $collation = $collations[RebuildPlan::columnKey($column)] ?? null;
+
+            if ($collation !== null) {
+                $column = $this->collated($rebuild['old'], $column, $collation);
+            }
+
+            $columns[] = $column;
+        }
+
+        return $table->edit()->setColumns(...$columns)->create();
+    }
+
+    /**
+     * The column declaring the collation.
+     *
+     * @throws NotSupported When the column's type cannot keep the collation, or its own definition leaves it out.
+     */
+    private function collated(Table $old, Column $column, string $collation): Column
+    {
+        $definition = $column->getColumnDefinition();
+
+        if ($definition !== null) {
+            if (stripos($definition, 'COLLATE') !== false) {
+                return $column;
+            }
+
+            throw new NotSupported(sprintf(
+                'Cannot rebuild table %s: its column %s has the collation %s, and the column\'s new definition, '
+                    . '%s, does not declare one. Add COLLATE %3$s after the type in the definition.',
+                $old->getObjectName()->toString(),
+                $column->getObjectName()->toString(),
+                $collation,
+                $definition,
+            ));
+        }
+
+        $type = Type::getType($column->getTypeName())->getSQLDeclaration($column->toArray(true), $this->platform);
+
+        if (preg_match('/^[A-Za-z0-9_.]+$/', $collation) !== 1 || preg_match(self::STRING_TYPE, $type) !== 1) {
+            throw new NotSupported(sprintf(
+                'Cannot rebuild table %s: its column %s has the collation %s, which the column\'s new type %s '
+                    . 'cannot keep. Change the column with hand-written SQL.',
+                $old->getObjectName()->toString(),
+                $column->getObjectName()->toString(),
+                $collation,
+                $type,
+            ));
+        }
+
+        return self::withPlatformOption($column, DuckDBPlatform::COLLATION_OPTION, $collation);
+    }
+
+    /**
+     * A check that fails while the table has a generated column, a CHECK
+     * constraint other than a column's minimum or maximum value, or a collated
+     * column: what a rebuild that did not read DuckDB's catalog would lose.
+     *
+     * @return Step
+     */
+    private function unreadCatalogCheck(Table $old): array
+    {
+        $name      = $old->getObjectName();
+        $qualifier = $name->getQualifier();
+        $schema    = $qualifier === null
+            ? 'current_schema()'
+            : $this->platform->quoteStringLiteral($qualifier->getValue());
+        $table     = $this->platform->quoteStringLiteral($name->getUnqualifiedName()->getValue());
+        $where     = sprintf(
+            'database_name = current_database() AND lower(schema_name) = lower(%s) AND lower(table_name) = lower(%s)',
+            $schema,
+            $table,
+        );
+
+        return self::step(sprintf(
+            'SELECT CASE WHEN EXISTS (SELECT 1 FROM duckdb_columns() WHERE %1$s AND is_generated) OR EXISTS '
+                . '(SELECT 1 FROM duckdb_constraints() WHERE %1$s AND constraint_type = \'CHECK\' AND NOT '
+                . 'regexp_matches(expression, %2$s)) OR EXISTS (SELECT 1 FROM duckdb_tables() WHERE %1$s AND sql LIKE '
+                . '\'%% COLLATE %%\') THEN error(%3$s) END',
+            $where,
+            $this->platform->quoteStringLiteral(DuckDBMetadataProvider::BOUND_PATTERN),
+            $this->platform->quoteStringLiteral(sprintf(
+                'Cannot rebuild table %s without reading DuckDB\'s catalog: it has a generated column, a CHECK '
+                    . 'constraint or a collation that DBAL cannot represent, which the rebuild would lose. Apply the '
+                    . 'change through the schema manager (alterSchema(), migrateSchema() or alterTable()) or a diff '
+                    . 'from its comparator.',
+                $name->toString(),
+            )),
+        ));
     }
 
     /**
@@ -744,7 +1163,7 @@ final class TableRebuilder
         }
 
         preg_match_all(
-            '/\'(?:[^\']|\'\')*\'|"((?:[^"]|"")+)"|(?<![A-Za-z0-9_$])([A-Za-z_][A-Za-z0-9_$]*+)(?!\s*\()/',
+            self::TOKENS,
             self::indexedExpressions($sql),
             $matches,
             PREG_SET_ORDER | PREG_UNMATCHED_AS_NULL,

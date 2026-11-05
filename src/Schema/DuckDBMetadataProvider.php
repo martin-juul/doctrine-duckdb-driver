@@ -108,6 +108,15 @@ use function usort;
  */
 final readonly class DuckDBMetadataProvider implements MetadataProvider
 {
+    /**
+     * The CHECK expressions that introspection maps to a column's minimum or
+     * maximum value, as DuckDB's catalog reports them; a regular expression
+     * that both PCRE and DuckDB's RE2 accept.
+     *
+     * @internal
+     */
+    public const string BOUND_PATTERN = '^\\((?:"((?:[^"]|"")+)"|([^\\s()"]+)) (>=|<=) (-?\\d+(?:\\.\\d+)?)\\)$';
+
     /** @internal This class can be instantiated only by the DuckDB platform. */
     public function __construct(private Connection $connection, private DuckDBPlatform $platform)
     {
@@ -559,30 +568,45 @@ final readonly class DuckDBMetadataProvider implements MetadataProvider
                 continue;
             }
 
-            if (
-                preg_match(
-                    '/^\((?:"((?:[^"]|"")+)"|([^\s()"]+)) (>=|<=) (-?\d+(?:\.\d+)?)\)$/',
-                    $expression,
-                    $matches,
-                ) !== 1
-            ) {
+            $bound = self::parseBound($expression, $columns[0]);
+
+            if ($bound === null) {
                 continue;
             }
 
-            $column = $matches[1] !== '' ? str_replace('""', '"', $matches[1]) : $matches[2];
+            $key = self::objectKey(self::nonEmptyString($schema), self::nonEmptyString($table)) . "\0" . $columns[0];
 
-            if (strcasecmp($column, $columns[0]) !== 0) {
-                continue;
-            }
-
-            $literal = $matches[4];
-            $value   = str_contains($literal, '.') ? (float) $literal : (int) $literal;
-            $key     = self::objectKey(self::nonEmptyString($schema), self::nonEmptyString($table)) . "\0" . $columns[0];
-
-            $bounds[$key][$matches[3] === '>=' ? 'min' : 'max'] = $value;
+            $bounds[$key][$bound[0]] = $bound[1];
         }
 
         return $bounds;
+    }
+
+    /**
+     * The bound that a CHECK expression on a single column declares, as
+     * DuckDB's catalog reports `(col >= n)` and `(col <= n)`: `min` or `max`
+     * with its value, or null for any other expression.
+     *
+     * @internal
+     *
+     * @return array{'min'|'max', int|float}|null
+     */
+    public static function parseBound(string $expression, string $column): array|null
+    {
+        if (preg_match('/' . self::BOUND_PATTERN . '/', $expression, $matches) !== 1) {
+            return null;
+        }
+
+        $name = $matches[1] !== '' ? str_replace('""', '"', $matches[1]) : $matches[2];
+
+        if (strcasecmp($name, $column) !== 0) {
+            return null;
+        }
+
+        $literal = $matches[4];
+        $value   = str_contains($literal, '.') ? (float) $literal : (int) $literal;
+
+        return [$matches[3] === '>=' ? 'min' : 'max', $value];
     }
 
     /**

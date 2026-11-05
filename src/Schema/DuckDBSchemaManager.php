@@ -199,8 +199,9 @@ class DuckDBSchemaManager extends AbstractSchemaManager
     }
 
     /**
-     * Applies the table diff; a rebuild covers only this table and keeps its
-     * indexes on expressions.
+     * Applies the table diff; a rebuild covers only this table, keeps its
+     * indexes on expressions, CHECK constraints and collations, and refuses a
+     * table with generated columns.
      *
      * @throws Exception
      */
@@ -264,7 +265,7 @@ class DuckDBSchemaManager extends AbstractSchemaManager
             $rebuilds[$closureKey] = RebuildPlan::rebuild($old, $new->create(), null);
         }
 
-        $rebuilds  = DuckDBComparator::withExpressionIndexes($this->connection, $this->platform, $rebuilds);
+        $rebuilds  = DuckDBComparator::withCatalogDetails($this->connection, $this->platform, $rebuilds);
         $rebuilder = new TableRebuilder($this->platform);
 
         $rebuilder->run($this->connection, $rebuilder->rebuildSteps($rebuilds));

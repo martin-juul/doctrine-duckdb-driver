@@ -28,9 +28,15 @@ use function count;
 use function implode;
 use function in_array;
 use function is_array;
+use function is_scalar;
 use function is_string;
+use function preg_match;
 use function sprintf;
+use function str_replace;
+use function strlen;
 use function strtolower;
+use function substr;
+use function trim;
 
 /**
  * Compares schemas and decides, per altered table, between native ALTER
@@ -75,9 +81,12 @@ use function strtolower;
  * the other table of the cycle references the table. ORM's schema tool and
  * validator, Doctrine Migrations and DBAL's schema manager compare schemas.
  *
- * With a connection, each rebuild also carries the indexes on expressions of
- * its table, which DBAL cannot represent, so that the rebuild recreates them.
+ * With a connection, each rebuild also carries what DBAL cannot represent of
+ * its table: the indexes on expressions, the CHECK constraints other than
+ * minimum and maximum values, and the columns' collations, so that the
+ * rebuild recreates them.
  *
+ * @phpstan-import-type CatalogCheck from RebuildPlan
  * @phpstan-import-type ExpressionIndex from RebuildPlan
  * @phpstan-import-type Rebuild from RebuildPlan
  */
@@ -145,9 +154,10 @@ final class DuckDBComparator extends Comparator
     }
 
     /**
-     * Adds to each rebuild the indexes on expressions of its old table, which
-     * introspection skips because DBAL cannot represent them, so that the
-     * rebuild recreates them.
+     * Adds to each rebuild what DBAL cannot represent of its old table, so
+     * that the rebuild recreates it: the indexes on expressions, which
+     * introspection skips, the CHECK constraints other than the minimum and
+     * maximum values of the old table's columns, and the columns' collations.
      *
      * @param array<string, Rebuild> $rebuilds The rebuilds, keyed by {@see RebuildPlan::tableKey()}.
      *
@@ -155,13 +165,13 @@ final class DuckDBComparator extends Comparator
      *
      * @throws Exception
      */
-    public static function withExpressionIndexes(Connection $connection, DuckDBPlatform $platform, array $rebuilds): array
+    public static function withCatalogDetails(Connection $connection, DuckDBPlatform $platform, array $rebuilds): array
     {
         if (count($rebuilds) === 0) {
             return $rebuilds;
         }
 
-        return self::addExpressionIndexes($connection, $platform, $rebuilds, self::readCurrentSchema($connection));
+        return self::addCatalogDetails($connection, $platform, $rebuilds, self::readCurrentSchema($connection));
     }
 
     /**
@@ -190,7 +200,9 @@ final class DuckDBComparator extends Comparator
     }
 
     /**
-     * Adds to each rebuild the indexes on expressions of its old table.
+     * Adds to each rebuild the indexes on expressions, the CHECK constraints
+     * that are not a minimum or maximum value of the old table's columns, and
+     * the column collations of its old table.
      *
      * @param array<string, Rebuild> $rebuilds The rebuilds, keyed by {@see RebuildPlan::tableKey()}.
      *
@@ -198,19 +210,65 @@ final class DuckDBComparator extends Comparator
      *
      * @throws Exception
      */
-    private static function addExpressionIndexes(
+    private static function addCatalogDetails(
         Connection $connection,
         DuckDBPlatform $platform,
         array $rebuilds,
         mixed $currentSchema,
     ): array {
-        $indexes = self::readExpressionIndexes($connection, $platform, $currentSchema);
+        $indexes    = self::readExpressionIndexes($connection, $platform, $currentSchema);
+        $checks     = self::readChecks($connection, $currentSchema);
+        $collations = self::readCollations($connection, $currentSchema);
 
-        foreach (array_keys($rebuilds) as $key) {
+        foreach ($rebuilds as $key => $rebuild) {
+            $kept = [];
+
+            foreach ($checks[$key] ?? [] as $check) {
+                if (self::isColumnBound($rebuild['old'], $check)) {
+                    continue;
+                }
+
+                $kept[] = $check;
+            }
+
             $rebuilds[$key]['expressionIndexes'] = $indexes[$key] ?? [];
+            $rebuilds[$key]['checks']            = $kept;
+            $rebuilds[$key]['collations']        = $collations[$key] ?? [];
+            $rebuilds[$key]['catalogRead']       = true;
         }
 
         return $rebuilds;
+    }
+
+    /**
+     * Whether the CHECK constraint is the minimum or maximum value of a
+     * column of the table, which the platform declares from the column.
+     *
+     * @param CatalogCheck $check
+     */
+    private static function isColumnBound(Table $table, array $check): bool
+    {
+        if (count($check['columns']) !== 1) {
+            return false;
+        }
+
+        $bound = DuckDBMetadataProvider::parseBound($check['expression'], $check['columns'][0]);
+
+        if ($bound === null) {
+            return false;
+        }
+
+        foreach ($table->getColumns() as $column) {
+            if (RebuildPlan::columnKey($column) !== strtolower($check['columns'][0])) {
+                continue;
+            }
+
+            $value = $bound[0] === 'min' ? $column->getMinimumValue() : $column->getMaximumValue();
+
+            return is_scalar($value) && (string) $value === (string) $bound[1];
+        }
+
+        return false;
     }
 
     /** @throws Exception */
@@ -336,7 +394,7 @@ final class DuckDBComparator extends Comparator
             self::refuseGeneratedColumns($this->connection, $rebuilt, $currentSchema);
 
             if (count($rebuilds) > 0) {
-                $rebuilds = self::addExpressionIndexes($this->connection, $this->platform, $rebuilds, $currentSchema);
+                $rebuilds = self::addCatalogDetails($this->connection, $this->platform, $rebuilds, $currentSchema);
             }
         }
 
@@ -665,6 +723,184 @@ final class DuckDBComparator extends Comparator
         }
 
         return $indexes;
+    }
+
+    /**
+     * The CHECK constraints of each table, keyed by
+     * {@see RebuildPlan::tableKey()}, in declaration order.
+     *
+     * @return array<string, list<CatalogCheck>>
+     *
+     * @throws Exception
+     */
+    private static function readChecks(Connection $connection, mixed $currentSchema): array
+    {
+        $checks = [];
+
+        $rows = $connection->fetchAllNumeric(<<<'SQL'
+            SELECT schema_name, table_name, constraint_name, expression, constraint_column_names
+            FROM duckdb_constraints()
+            WHERE database_name = current_database()
+              AND constraint_type = 'CHECK'
+            ORDER BY schema_name, table_name, constraint_index
+            SQL);
+
+        foreach ($rows as [$schema, $table, $name, $expression, $columns]) {
+            if (! is_string($schema) || ! is_string($table) || ! is_string($expression) || ! is_array($columns)) {
+                continue;
+            }
+
+            $names = [];
+
+            foreach ($columns as $column) {
+                if (! is_string($column)) {
+                    continue;
+                }
+
+                $names[] = $column;
+            }
+
+            $checks[self::catalogKey($schema, $table, $currentSchema)][] = [
+                'name' => is_string($name) ? $name : '',
+                'expression' => $expression,
+                'columns' => $names,
+            ];
+        }
+
+        return $checks;
+    }
+
+    /**
+     * The collation of each collated column, keyed by
+     * {@see RebuildPlan::tableKey()} and by the column's name in lower case.
+     *
+     * DuckDB reports a collation only in the CREATE TABLE statement of
+     * duckdb_tables(), right after the column's VARCHAR type.
+     *
+     * @return array<string, array<string, string>>
+     *
+     * @throws Exception
+     */
+    private static function readCollations(Connection $connection, mixed $currentSchema): array
+    {
+        $collations = [];
+
+        $rows = $connection->fetchAllNumeric(<<<'SQL'
+            SELECT schema_name, table_name, sql
+            FROM duckdb_tables()
+            WHERE database_name = current_database()
+              AND sql LIKE '% COLLATE %'
+            SQL);
+
+        foreach ($rows as [$schema, $table, $sql]) {
+            if (! is_string($schema) || ! is_string($table) || ! is_string($sql)) {
+                continue;
+            }
+
+            $columns = self::collatedColumns($sql);
+
+            if (count($columns) === 0) {
+                continue;
+            }
+
+            $collations[self::catalogKey($schema, $table, $currentSchema)] = $columns;
+        }
+
+        return $collations;
+    }
+
+    /**
+     * The collated columns of a CREATE TABLE statement as DuckDB's catalog
+     * reports it, `CREATE TABLE name(column VARCHAR COLLATE collation ..., ...);`,
+     * keyed by the column's name in lower case.
+     *
+     * @return array<string, string>
+     */
+    private static function collatedColumns(string $sql): array
+    {
+        $collations = [];
+
+        foreach (self::tableElements($sql) as $element) {
+            if (
+                preg_match(
+                    '/^(?:"((?:[^"]|"")+)"|([^\s"]+)) VARCHAR COLLATE ([^\s,()]+)/',
+                    $element,
+                    $matches,
+                ) !== 1
+            ) {
+                continue;
+            }
+
+            $name = $matches[1] !== '' ? str_replace('""', '"', $matches[1]) : $matches[2];
+
+            $collations[strtolower($name)] = $matches[3];
+        }
+
+        return $collations;
+    }
+
+    /**
+     * The comma-separated elements between the outermost parentheses of a
+     * CREATE TABLE statement: its column definitions and table constraints.
+     *
+     * @return list<string>
+     */
+    private static function tableElements(string $sql): array
+    {
+        $elements = [];
+        $depth    = 0;
+        $quote    = null;
+        $start    = 0;
+        $length   = strlen($sql);
+
+        for ($position = 0; $position < $length; $position++) {
+            $character = $sql[$position];
+
+            if ($quote !== null) {
+                if ($character === $quote) {
+                    $quote = null;
+                }
+
+                continue;
+            }
+
+            if ($character === "'" || $character === '"') {
+                $quote = $character;
+
+                continue;
+            }
+
+            if ($character === '(') {
+                $depth++;
+
+                if ($depth === 1) {
+                    $start = $position + 1;
+                }
+
+                continue;
+            }
+
+            if ($character === ')') {
+                $depth--;
+
+                if ($depth === 0) {
+                    $elements[] = trim(substr($sql, $start, $position - $start));
+
+                    break;
+                }
+
+                continue;
+            }
+
+            if ($character !== ',' || $depth !== 1) {
+                continue;
+            }
+
+            $elements[] = trim(substr($sql, $start, $position - $start));
+            $start      = $position + 1;
+        }
+
+        return $elements;
     }
 
     /** The {@see RebuildPlan::tableKey()} of a table DuckDB's catalog names. */

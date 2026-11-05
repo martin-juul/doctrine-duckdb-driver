@@ -499,6 +499,48 @@ final class RebuildTest extends FunctionalTestCase
         $this->diff($target);
     }
 
+    public function testAlterTableRefusesATableWithAGeneratedColumnAndChangesNothing(): void
+    {
+        $this->open(false);
+
+        $this->connection->executeStatement(
+            'CREATE TABLE gen (id INTEGER PRIMARY KEY, two INTEGER GENERATED ALWAYS AS (2), label VARCHAR)',
+        );
+        $this->connection->executeStatement("INSERT INTO gen (id, label) VALUES (1, 'a')");
+
+        $old  = $this->schemaManager()->introspectTableByUnquotedName('gen');
+        $diff = $this->schemaManager()->createComparator()->compareTables(
+            $old,
+            $old->edit()->renameColumnByUnquotedName('label', 'title')->create(),
+        );
+
+        try {
+            $this->schemaManager()->alterTable($diff);
+
+            self::fail('The rebuild succeeded.');
+        } catch (NotSupported $e) {
+            self::assertStringContainsString('gen.two is a generated column', $e->getMessage());
+        }
+
+        try {
+            foreach ($this->platform()->getAlterTableSQL($diff) as $sql) {
+                $this->connection->executeStatement($sql);
+            }
+
+            self::fail('The generated SQL succeeded.');
+        } catch (DriverException $e) {
+            self::assertStringContainsString('it has a generated column', $e->getMessage());
+        }
+
+        self::assertSame(
+            [['id', 0], ['two', 1], ['label', 0]],
+            $this->connection->fetchAllNumeric(
+                "SELECT column_name, is_generated::INTEGER FROM duckdb_columns() WHERE table_name = 'gen' "
+                    . 'ORDER BY column_index',
+            ),
+        );
+    }
+
     #[DataProvider('storages')]
     public function testANewTableReferencingARebuiltTableIsCreatedAfterTheRebuild(bool $file): void
     {

@@ -223,7 +223,7 @@ Migrations work as usual: `migrations:diff` generates DuckDB SQL, and `migration
 
 ### Table rebuilds
 
-When a change cannot be expressed with DuckDB's `ALTER TABLE` (for example renaming a column of a table that has an index or is referenced by a foreign key), the generated SQL rebuilds the table and every table that references it. The rebuild copies the rows to a staging table, recreates the table and copies them back, keeping indexes, comments and sequence defaults. It runs inside the migration's transaction, so a failure leaves the tables and rows unchanged. [Limitations](limitations.md#schema-changes-and-table-rebuilds) covers the cost and the cases a rebuild refuses.
+When a change cannot be expressed with DuckDB's `ALTER TABLE` (for example renaming a column of a table that has an index or is referenced by a foreign key), the generated SQL rebuilds the table and every table that references it. The rebuild copies the rows to a staging table, recreates the table and copies them back, keeping indexes, comments, sequence defaults, `CHECK` constraints and collations. It runs inside the migration's transaction, so a failure leaves the tables and rows unchanged. [Limitations](limitations.md#schema-changes-and-table-rebuilds) covers the cost and the cases a rebuild refuses.
 
 Generated rebuild SQL contains two marker statements, `DBAL_DUCKDB_REBUILD_BEGIN` and `DBAL_DUCKDB_REBUILD_END`, which the driver handles. Run the SQL through DBAL; the DuckDB CLI rejects the markers.
 

@@ -28,9 +28,12 @@ use function strtolower;
  * it. A rebuilt table is copied column by column: each pair names the old
  * column a value comes from and the new column it goes to.
  *
- * A rebuild also carries the indexes on expressions of the old table, which
- * DBAL cannot represent and introspection skips, as DuckDB's catalog reports
- * them; only a caller with a connection can read them.
+ * A rebuild also carries what DBAL cannot represent of the old table, as
+ * DuckDB's catalog reports it: the indexes on expressions, which
+ * introspection skips, the CHECK constraints other than the minimum and
+ * maximum values introspection maps to column options, and the columns'
+ * collations. Only a caller with a connection can read them; `catalogRead`
+ * says whether one did.
  *
  * The plan also names the foreign keys that the compared schemas leave out
  * to break cycles between their tables, keyed by the identity that
@@ -40,11 +43,15 @@ use function strtolower;
  * @internal
  *
  * @phpstan-type ExpressionIndex array{schema: string, table: string, name: non-empty-string, unique: bool, sql: string}
+ * @phpstan-type CatalogCheck array{name: string, expression: string, columns: list<string>}
  * @phpstan-type Rebuild array{
  *     old: Table,
  *     new: Table,
  *     columns: list<array{Column, Column}>,
  *     expressionIndexes: list<ExpressionIndex>,
+ *     checks: list<CatalogCheck>,
+ *     collations: array<string, string>,
+ *     catalogRead: bool,
  * }
  */
 final class RebuildPlan
@@ -69,8 +76,9 @@ final class RebuildPlan
 
     /**
      * A rebuild entry whose columns are paired by the diff's renames, or by
-     * name when there is no diff. Its expression indexes are added by
-     * {@see DuckDBComparator::withExpressionIndexes()}.
+     * name when there is no diff. What it carries from DuckDB's catalog is
+     * added by {@see DuckDBComparator::withCatalogDetails()}; the collations
+     * are keyed by {@see columnKey()} of the old column.
      *
      * @return Rebuild
      */
@@ -81,6 +89,9 @@ final class RebuildPlan
             'new' => $new,
             'columns' => self::pairColumns($old, $new, $diff),
             'expressionIndexes' => [],
+            'checks' => [],
+            'collations' => [],
+            'catalogRead' => false,
         ];
     }
 

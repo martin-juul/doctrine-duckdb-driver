@@ -61,6 +61,7 @@ use function sprintf;
 use function str_contains;
 use function str_ends_with;
 use function str_replace;
+use function strlen;
 use function strtolower;
 use function strtoupper;
 use function substr;
@@ -103,6 +104,15 @@ class DuckDBPlatform extends AbstractPlatform
      */
     public const string OWNED_SEQUENCE_OPTION = 'duckdb_owned_sequence';
 
+    /**
+     * The platform option that declares a column's collation, as DuckDB names
+     * it, such as `NOCASE`. Introspection does not report collations; a table
+     * rebuild sets the option to keep the collation of the old column.
+     *
+     * @internal
+     */
+    public const string COLLATION_OPTION = 'duckdb_collation';
+
     private bool $omitForeignKeys = false;
 
     /**
@@ -137,6 +147,14 @@ class DuckDBPlatform extends AbstractPlatform
      * @var array<int, string>
      */
     private array $ownedSequenceDefaults = [];
+
+    /**
+     * While a table's CREATE statement is built: the expressions of the CHECK
+     * constraints that a rebuild carries over from the old table.
+     *
+     * @var list<string>
+     */
+    private array $carriedChecks = [];
 
     /**
      * The rebuild plans that the comparator registered, per schema diff.
@@ -401,16 +419,19 @@ class DuckDBPlatform extends AbstractPlatform
     /**
      * Creates the tables like {@see self::getCreateTablesSQL()}, also leaving
      * out the given foreign keys: those that a larger set of tables, such as
-     * the target schema of a comparison, leaves out to break cycles.
+     * the target schema of a comparison, leaves out to break cycles. A table
+     * also declares the given CHECK constraints, which a rebuild carries over.
      *
      * @internal
      *
-     * @param array<Table>        $tables
-     * @param array<string, true> $omittedForeignKeys Keyed by {@see ForeignKeyCycles::identity()}.
+     * @param array<Table>                $tables
+     * @param array<string, true>         $omittedForeignKeys Keyed by {@see ForeignKeyCycles::identity()}.
+     * @param array<string, list<string>> $checks             The expressions of each table's CHECK constraints, keyed
+     *                                                        by {@see RebuildPlan::tableKey()}.
      *
      * @return list<string>
      */
-    public function createTablesSQL(array $tables, array $omittedForeignKeys): array
+    public function createTablesSQL(array $tables, array $omittedForeignKeys, array $checks = []): array
     {
         $tables      = array_values($tables);
         $foreignKeys = $this->createdForeignKeys($tables, $omittedForeignKeys);
@@ -445,6 +466,7 @@ class DuckDBPlatform extends AbstractPlatform
 
                 $this->referencedColumnLists    = $referenced[$key] ?? [];
                 $this->ownedSequenceDefaults    = [];
+                $this->carriedChecks            = $checks[$key] ?? [];
                 $this->creatingTableForeignKeys = [$table->getObjectName(), $identities];
 
                 foreach ($table->getColumns() as $position => $column) {
@@ -464,6 +486,7 @@ class DuckDBPlatform extends AbstractPlatform
         } finally {
             $this->referencedColumnLists    = [];
             $this->ownedSequenceDefaults    = [];
+            $this->carriedChecks            = [];
             $this->keyColumnOrders          = [];
             $this->creatingTableForeignKeys = null;
         }
@@ -657,6 +680,10 @@ class DuckDBPlatform extends AbstractPlatform
             $definitions[] = $check;
         }
 
+        foreach ($this->carriedChecks as $expression) {
+            $definitions[] = 'CHECK (' . $expression . ')';
+        }
+
         $sql = ['CREATE TABLE ' . $name . ' (' . implode(', ', $definitions) . ')'];
 
         foreach ($indexes as $index) {
@@ -678,6 +705,39 @@ class DuckDBPlatform extends AbstractPlatform
         }
 
         return $sql;
+    }
+
+    /**
+     * Declares the collation of the {@see self::COLLATION_OPTION} platform
+     * option right after the column's type, where DuckDB expects it: after a
+     * default, it would collate the default's expression instead.
+     *
+     * {@inheritDoc}
+     */
+    public function getColumnDeclarationSQL(string $name, array $column): string
+    {
+        $declaration = parent::getColumnDeclarationSQL($name, $column);
+        $collation   = self::collationOption($column);
+
+        if ($collation === null || isset($column['columnDefinition'])) {
+            return $declaration;
+        }
+
+        $prefix = $name . ' ' . $this->getColumnType($column)->getSQLDeclaration($column, $this);
+
+        return $prefix . ' COLLATE ' . $collation . substr($declaration, strlen($prefix));
+    }
+
+    /** @param array<string, mixed> $column The column's properties, as {@see Column::toArray()} returns them. */
+    private static function collationOption(array $column): string|null
+    {
+        $collation = $column[self::COLLATION_OPTION] ?? null;
+
+        if (! is_string($collation) || $collation === '') {
+            return null;
+        }
+
+        return $collation;
     }
 
     /** DuckDB cannot create partial indexes, so an index with a predicate fails at generation. */
@@ -729,7 +789,10 @@ class DuckDBPlatform extends AbstractPlatform
      * Applies the diff with native ALTER statements where DuckDB can, and
      * otherwise rebuilds the table; see {@see TableRebuilder}. Without the
      * comparison a schema diff carries, only this table is rebuilt, so the
-     * rebuild fails at the drop when another table references it.
+     * rebuild fails at the drop when another table references it. Without a
+     * connection to read DuckDB's catalog, the rebuild also fails when the
+     * table has a generated column, a CHECK constraint DBAL cannot represent
+     * or a collation, which it would lose.
      *
      * @return list<string>
      */
