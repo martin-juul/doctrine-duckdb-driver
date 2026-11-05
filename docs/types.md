@@ -47,13 +47,13 @@ DBAL results and the [streaming helper](#streaming-rows) return these values. Da
 | `guid` | `UUID` | |
 | `json` | `JSON` | |
 | `date_mutable`, `date_immutable` | `DATE` | |
-| `datetime_mutable`, `datetime_immutable` | `TIMESTAMP` | |
+| `datetime_mutable`, `datetime_immutable` | `TIMESTAMP_S` | Second precision, like DBAL's `Y-m-d H:i:s` format, so `#[Version]` datetime columns match what ORM reads back |
 | `datetimetz_mutable`, `datetimetz_immutable` | `TIMESTAMPTZ` | |
 | `time_mutable`, `time_immutable` | `TIME` | Whole seconds. |
 
 DBAL's `dateinterval` type stores a string in a `VARCHAR` column. For a native `INTERVAL` column, use [`duckdb_interval`](#duckdb_interval).
 
-Introspection maps DuckDB's column types back to the types above, maps `HUGEINT`, `INTERVAL`, `LIST`, `STRUCT` and `MAP` to the package's custom types, and maps every other type, such as `TINYINT`, the unsigned integers, `TIMESTAMP_NS`, `ENUM`, `UNION` and fixed-size arrays (`INTEGER[3]`), to [`duckdb_native`](#duckdb_native), which keeps the DuckDB declaration. Comparing a schema with its own introspection therefore never proposes a type change.
+Introspection maps DuckDB's column types back to the types above, maps `HUGEINT`, `INTERVAL`, `LIST`, `STRUCT` and `MAP` to the package's custom types, and maps every other type, such as `TINYINT`, the unsigned integers, `TIMESTAMP` (microsecond), `TIMESTAMP_MS`, `TIMESTAMP_NS`, `ENUM`, `UNION` and fixed-size arrays (`INTEGER[3]`), to [`duckdb_native`](#duckdb_native), which keeps the DuckDB declaration. Comparing a schema with its own introspection therefore never proposes a type change.
 
 ## Custom types
 
