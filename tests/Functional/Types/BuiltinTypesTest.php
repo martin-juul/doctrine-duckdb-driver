@@ -55,7 +55,7 @@ final class BuiltinTypesTest extends TypeTestCase
     public static function dateAndTimeTypes(): iterable
     {
         yield 'date' => [Types::DATE_IMMUTABLE, 'DATE'];
-        yield 'datetime' => [Types::DATETIME_IMMUTABLE, 'TIMESTAMP'];
+        yield 'datetime' => [Types::DATETIME_IMMUTABLE, 'TIMESTAMP_S'];
         yield 'datetimetz' => [Types::DATETIMETZ_IMMUTABLE, 'TIMESTAMP WITH TIME ZONE'];
         yield 'time' => [Types::TIME_IMMUTABLE, 'TIME'];
     }

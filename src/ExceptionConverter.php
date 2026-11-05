@@ -8,12 +8,15 @@ use Doctrine\DBAL\Driver\API\ExceptionConverter as ExceptionConverterInterface;
 use Doctrine\DBAL\Driver\Exception;
 use Doctrine\DBAL\Exception\ConnectionException;
 use Doctrine\DBAL\Exception\ConstraintViolationException;
+use Doctrine\DBAL\Exception\DatabaseObjectExistsException;
+use Doctrine\DBAL\Exception\DatabaseObjectNotFoundException;
 use Doctrine\DBAL\Exception\DeadlockException;
 use Doctrine\DBAL\Exception\DriverException;
 use Doctrine\DBAL\Exception\ForeignKeyConstraintViolationException;
 use Doctrine\DBAL\Exception\InvalidFieldNameException;
 use Doctrine\DBAL\Exception\NonUniqueFieldNameException;
 use Doctrine\DBAL\Exception\NotNullConstraintViolationException;
+use Doctrine\DBAL\Exception\SchemaDoesNotExist;
 use Doctrine\DBAL\Exception\ServerException;
 use Doctrine\DBAL\Exception\SyntaxErrorException;
 use Doctrine\DBAL\Exception\TableExistsException;
@@ -122,12 +125,27 @@ final class ExceptionConverter implements ExceptionConverterInterface
         string $message,
         Query|null $query,
     ): DriverException {
-        if (preg_match('/\b(?:Table|View|Sequence|Index) with name .+ does not exist!/', $message) === 1) {
+        // "Table with name s.t does not exist because schema s does not exist." names a missing table too.
+        if (preg_match('/\b(?:Table|View|Sequence|Index) with name .+ does not exist[!.]/', $message) === 1) {
             return new TableNotFoundException($exception, $query);
+        }
+
+        if (preg_match('/\bSchema with name .+ does not exist!/', $message) === 1) {
+            return new SchemaDoesNotExist($exception, $query);
+        }
+
+        // Types, macros and functions, which DBAL has no dedicated exception for.
+        if (preg_match('/ with name .+ does not exist!/', $message) === 1) {
+            return new DatabaseObjectNotFoundException($exception, $query);
         }
 
         if (preg_match('/\b(?:Table|View|Sequence|Index) with name .+ already exists!/', $message) === 1) {
             return new TableExistsException($exception, $query);
+        }
+
+        // Schemas, types, macros and functions.
+        if (preg_match('/ with name .+ already exists!/', $message) === 1) {
+            return new DatabaseObjectExistsException($exception, $query);
         }
 
         return new DriverException($exception, $query);

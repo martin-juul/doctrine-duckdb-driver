@@ -56,7 +56,7 @@ final class DuckDBPlatformTest extends TestCase
         yield 'decimal' => [Types::DECIMAL, ['precision' => 10, 'scale' => 2], 'NUMERIC(10, 2)'];
         yield 'date' => [Types::DATE_IMMUTABLE, [], 'DATE'];
         yield 'time' => [Types::TIME_IMMUTABLE, [], 'TIME'];
-        yield 'datetime' => [Types::DATETIME_IMMUTABLE, [], 'TIMESTAMP'];
+        yield 'datetime' => [Types::DATETIME_IMMUTABLE, [], 'TIMESTAMP_S'];
         yield 'datetimetz' => [Types::DATETIMETZ_IMMUTABLE, [], 'TIMESTAMPTZ'];
     }
 

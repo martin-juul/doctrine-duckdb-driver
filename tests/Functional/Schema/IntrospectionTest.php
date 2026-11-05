@@ -160,7 +160,7 @@ final class IntrospectionTest extends FunctionalTestCase
         $this->connection->executeStatement(<<<'SQL'
             CREATE TABLE defaults (
                 quoted VARCHAR DEFAULT 'it''s',
-                declared_now TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                declared_now TIMESTAMP_S DEFAULT CURRENT_TIMESTAMP,
                 function_now TIMESTAMPTZ DEFAULT now(),
                 today DATE DEFAULT CURRENT_DATE,
                 clock TIME DEFAULT CURRENT_TIME,
@@ -205,6 +205,7 @@ final class IntrospectionTest extends FunctionalTestCase
             'u' => 'UNION(n INTEGER, s VARCHAR)',
             't' => 'TINYINT',
             'ut' => 'UTINYINT',
+            'ts' => 'TIMESTAMP',
             'ns' => 'TIMESTAMP_NS',
             'tz' => 'TIME WITH TIME ZONE',
             'big' => 'BIGNUM',

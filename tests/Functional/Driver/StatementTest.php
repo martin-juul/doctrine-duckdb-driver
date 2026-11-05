@@ -8,6 +8,7 @@ use Doctrine\DBAL\Exception\DriverException;
 use Doctrine\DBAL\ParameterType;
 use MartinJuul\DBAL\DuckDB\Tests\Functional\FunctionalTestCase;
 use PHPUnit\Framework\Attributes\DataProvider;
+use Stringable;
 
 use function fopen;
 use function fwrite;
@@ -67,6 +68,49 @@ final class StatementTest extends FunctionalTestCase
         $connection->executeStatement('INSERT INTO t VALUES (?)', ["a\xff"], [ParameterType::BINARY]);
 
         self::assertSame("a\xff", $connection->fetchOne('SELECT v FROM t'));
+    }
+
+    /** @return iterable<string, array{ParameterType}> */
+    public static function stringParameterTypes(): iterable
+    {
+        yield 'string' => [ParameterType::STRING];
+        yield 'ascii' => [ParameterType::ASCII];
+    }
+
+    #[DataProvider('stringParameterTypes')]
+    public function testStringableObjectBindsAsItsString(ParameterType $type): void
+    {
+        $id = new class ('id-42') implements Stringable {
+            public function __construct(private readonly string $value)
+            {
+            }
+
+            public function __toString(): string
+            {
+                return $this->value;
+            }
+        };
+
+        $connection = self::connect();
+        $connection->executeStatement('CREATE TABLE t (v VARCHAR)');
+        $connection->executeStatement("INSERT INTO t VALUES ('id-42'), ('id-7')");
+
+        self::assertSame(['id-42'], $connection->fetchFirstColumn('SELECT v FROM t WHERE v = ?', [$id], [$type]));
+    }
+
+    public function testStringableObjectWithInvalidUtf8IsRejected(): void
+    {
+        $id = new class implements Stringable {
+            public function __toString(): string
+            {
+                return "a\xff";
+            }
+        };
+
+        $this->expectException(DriverException::class);
+        $this->expectExceptionMessage('not valid UTF-8');
+
+        self::connect()->fetchOne('SELECT ?', [$id], [ParameterType::STRING]);
     }
 
     public function testStatementRunsAgainWithNewValues(): void

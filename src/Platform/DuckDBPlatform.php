@@ -222,10 +222,15 @@ class DuckDBPlatform extends AbstractPlatform
         return 'FLOAT';
     }
 
-    /** @param array<string, mixed> $column */
+    /**
+     * Second precision, like DBAL's datetime format, so that a value read back
+     * equals the one DBAL writes, which ORM version columns rely on.
+     *
+     * @param array<string, mixed> $column
+     */
     public function getDateTimeTypeDeclarationSQL(array $column): string
     {
-        return 'TIMESTAMP';
+        return 'TIMESTAMP_S';
     }
 
     /** @param array<string, mixed> $column */
@@ -785,6 +790,11 @@ class DuckDBPlatform extends AbstractPlatform
      * DBAL declaration would differ from the DuckDB type map to the opaque
      * `duckdb_native` type, which keeps the DuckDB declaration, so that
      * introspection never proposes changing a column's type.
+     *
+     * DBAL's datetime types declare TIMESTAMP_S, because DBAL formats their
+     * values to the second, so TIMESTAMP_S maps back to `datetime`. A
+     * microsecond TIMESTAMP column is opaque: as `datetime` a table rebuild
+     * would redeclare it TIMESTAMP_S and drop its microseconds.
      */
     protected function initializeDoctrineTypeMappings(): void
     {
@@ -813,11 +823,11 @@ class DuckDBPlatform extends AbstractPlatform
             'struct' => StructType::NAME,
             'time' => Types::TIME_MUTABLE,
             'time with time zone' => NativeType::NAME,
-            'timestamp' => Types::DATETIME_MUTABLE,
+            'timestamp' => NativeType::NAME,
             'timestamp with time zone' => Types::DATETIMETZ_MUTABLE,
             'timestamp_ms' => NativeType::NAME,
             'timestamp_ns' => NativeType::NAME,
-            'timestamp_s' => NativeType::NAME,
+            'timestamp_s' => Types::DATETIME_MUTABLE,
             'tinyint' => NativeType::NAME,
             'ubigint' => NativeType::NAME,
             'uhugeint' => NativeType::NAME,

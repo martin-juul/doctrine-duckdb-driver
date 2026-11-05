@@ -6,11 +6,11 @@ namespace MartinJuul\DBAL\DuckDB\Driver;
 
 use Closure;
 use Doctrine\DBAL\Driver\Result as ResultInterface;
+use Doctrine\DBAL\Exception\InvalidColumnIndex;
 use DuckDB\Exception as DuckDBException;
 use DuckDB\FetchMode;
 use DuckDB\Result as NativeResult;
 use MartinJuul\DBAL\DuckDB\Driver\Exception\DriverError;
-use OutOfBoundsException;
 
 use function count;
 use function in_array;
@@ -144,7 +144,7 @@ final class Result implements ResultInterface
         $names = $this->names();
 
         if (! isset($names[$index])) {
-            throw new OutOfBoundsException('Column index ' . $index . ' is out of range.');
+            throw InvalidColumnIndex::new($index);
         }
 
         return $names[$index];

@@ -7,6 +7,8 @@ namespace MartinJuul\DBAL\DuckDB\Tests\Functional;
 use Doctrine\DBAL\Connection;
 use Doctrine\DBAL\Exception\ConnectionException;
 use Doctrine\DBAL\Exception\ConstraintViolationException;
+use Doctrine\DBAL\Exception\DatabaseObjectExistsException;
+use Doctrine\DBAL\Exception\DatabaseObjectNotFoundException;
 use Doctrine\DBAL\Exception\DeadlockException;
 use Doctrine\DBAL\Exception\DriverException;
 use Doctrine\DBAL\Exception\ForeignKeyConstraintViolationException;
@@ -14,6 +16,7 @@ use Doctrine\DBAL\Exception\InvalidFieldNameException;
 use Doctrine\DBAL\Exception\NonUniqueFieldNameException;
 use Doctrine\DBAL\Exception\NotNullConstraintViolationException;
 use Doctrine\DBAL\Exception\RetryableException;
+use Doctrine\DBAL\Exception\SchemaDoesNotExist;
 use Doctrine\DBAL\Exception\ServerException;
 use Doctrine\DBAL\Exception\SyntaxErrorException;
 use Doctrine\DBAL\Exception\TableExistsException;
@@ -163,6 +166,7 @@ final class ExceptionConverterTest extends FunctionalTestCase
         yield 'view' => ['DROP VIEW missing'];
         yield 'sequence' => ['DROP SEQUENCE missing'];
         yield 'index' => ['DROP INDEX missing'];
+        yield 'table in a missing schema' => ['SELECT * FROM missing_schema.missing'];
     }
 
     #[DataProvider('missingObjects')]
@@ -172,6 +176,45 @@ final class ExceptionConverterTest extends FunctionalTestCase
 
         self::assertConverted(
             TableNotFoundException::class,
+            static fn () => $connection->executeStatement($sql),
+        );
+    }
+
+    /** @return iterable<string, array{string}> */
+    public static function missingSchemas(): iterable
+    {
+        yield 'drop' => ['DROP SCHEMA missing_schema'];
+        yield 'create table in it' => ['CREATE TABLE missing_schema.t (id INTEGER)'];
+    }
+
+    #[DataProvider('missingSchemas')]
+    public function testMissingSchemaIsSchemaDoesNotExist(string $sql): void
+    {
+        $connection = self::connect();
+
+        $exception = self::assertConverted(
+            SchemaDoesNotExist::class,
+            static fn () => $connection->executeStatement($sql),
+        );
+
+        self::assertInstanceOf(DatabaseObjectNotFoundException::class, $exception);
+    }
+
+    /** @return iterable<string, array{string}> */
+    public static function missingOtherObjects(): iterable
+    {
+        yield 'type' => ['DROP TYPE missing'];
+        yield 'macro' => ['DROP MACRO missing'];
+        yield 'scalar function' => ['SELECT missing(1)'];
+    }
+
+    #[DataProvider('missingOtherObjects')]
+    public function testOtherMissingObjectIsDatabaseObjectNotFound(string $sql): void
+    {
+        $connection = self::connect();
+
+        self::assertConverted(
+            DatabaseObjectNotFoundException::class,
             static fn () => $connection->executeStatement($sql),
         );
     }
@@ -196,6 +239,25 @@ final class ExceptionConverterTest extends FunctionalTestCase
 
         self::assertConverted(
             TableExistsException::class,
+            static fn () => $connection->executeStatement($sql),
+        );
+    }
+
+    /** @return iterable<string, array{string}> */
+    public static function existingOtherObjects(): iterable
+    {
+        yield 'schema' => ['CREATE SCHEMA main'];
+        yield 'type' => ['CREATE TYPE ty AS INTEGER'];
+    }
+
+    #[DataProvider('existingOtherObjects')]
+    public function testOtherDuplicateObjectIsDatabaseObjectExists(string $sql): void
+    {
+        $connection = self::connect();
+        $connection->executeStatement('CREATE TYPE ty AS INTEGER');
+
+        self::assertConverted(
+            DatabaseObjectExistsException::class,
             static fn () => $connection->executeStatement($sql),
         );
     }

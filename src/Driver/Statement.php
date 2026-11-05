@@ -7,8 +7,10 @@ namespace MartinJuul\DBAL\DuckDB\Driver;
 use Doctrine\DBAL\Driver\Statement as StatementInterface;
 use Doctrine\DBAL\ParameterType;
 use DuckDB\Statement as NativeStatement;
+use DuckDB\Value;
 use MartinJuul\DBAL\DuckDB\Driver\Exception\DriverError;
 use MartinJuul\DBAL\DuckDB\Driver\Exception\InvalidUtf8Parameter;
+use Stringable;
 use TypeError;
 use ValueError;
 
@@ -89,6 +91,11 @@ final class Statement implements StatementInterface
 
             case ParameterType::STRING:
             case ParameterType::ASCII:
+                // Like PDO, a string parameter binds an object's string form; typed values bind unchanged (KTD6).
+                if ($value instanceof Stringable && ! $value instanceof Value) {
+                    $value = (string) $value;
+                }
+
                 if (is_string($value) && ! isValidUtf8($value)) {
                     throw InvalidUtf8Parameter::forParameter($param);
                 }

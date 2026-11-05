@@ -235,7 +235,7 @@ final class GeneratedSqlTest extends FunctionalTestCase
             'decimal_col' => 'DECIMAL(10,2)',
             'date_col' => 'DATE',
             'time_col' => 'TIME',
-            'datetime_col' => 'TIMESTAMP',
+            'datetime_col' => 'TIMESTAMP_S',
             'datetimetz_col' => 'TIMESTAMP WITH TIME ZONE',
         ], $types);
     }

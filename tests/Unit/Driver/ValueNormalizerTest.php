@@ -46,6 +46,7 @@ final class ValueNormalizerTest extends TestCase
             '2026-01-02 03:04:05.123456',
         ];
 
+        yield 'timestamp_s' => ['TIMESTAMP_S', new DateTimeImmutable('2026-01-02 03:04:05', $utc), '2026-01-02 03:04:05'];
         yield 'timestamp_ns' => ['TIMESTAMP_NS', new DateTimeImmutable('2026-01-02 03:04:05.5', $utc), '2026-01-02 03:04:05.500000'];
         yield 'timestamptz in the default zone' => [
             'TIMESTAMP_TZ',

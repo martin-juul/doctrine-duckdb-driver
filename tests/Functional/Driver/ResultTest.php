@@ -7,11 +7,13 @@ namespace MartinJuul\DBAL\DuckDB\Tests\Functional\Driver;
 use DateInterval;
 use DateTime;
 use DateTimeImmutable;
+use Doctrine\DBAL\Exception\InvalidColumnIndex;
 use Doctrine\DBAL\Types\Type;
 use Doctrine\DBAL\Types\Types;
 use MartinJuul\DBAL\DuckDB\Tests\Functional\FunctionalTestCase;
 use PHPUnit\Framework\Attributes\After;
 use PHPUnit\Framework\Attributes\Before;
+use PHPUnit\Framework\Attributes\DataProvider;
 
 use function date_default_timezone_get;
 use function date_default_timezone_set;
@@ -128,5 +130,24 @@ final class ResultTest extends FunctionalTestCase
         self::assertSame(2, $result->columnCount());
         self::assertSame('b', $result->getColumnName(1));
         self::assertSame([['a' => 1, 'b' => 2]], $result->fetchAllAssociative());
+    }
+
+    /** @return iterable<string, array{int}> */
+    public static function invalidColumnIndexes(): iterable
+    {
+        yield 'negative' => [-1];
+        yield 'past the last column' => [2];
+    }
+
+    #[DataProvider('invalidColumnIndexes')]
+    public function testColumnNameWithInvalidIndexIsInvalidColumnIndex(int $index): void
+    {
+        $result = self::connect()->executeQuery('SELECT 1 AS a, 2 AS b');
+        $result->fetchAllAssociative();
+
+        $this->expectException(InvalidColumnIndex::class);
+        $this->expectExceptionMessage('Invalid column index "' . $index . '".');
+
+        $result->getColumnName($index);
     }
 }
