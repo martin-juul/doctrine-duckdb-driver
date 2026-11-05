@@ -6,7 +6,9 @@ declare(strict_types=1);
  * Upstream Doctrine tests that cannot pass on DuckDB 2.0, applied by
  * SkipListExtension. Keys are Class::method (every data set) or
  * Class::method#<data set name> (one data set). Each entry names a category
- * and gives a reason sentence. run.php fails on an entry that names no test,
+ * and gives a reason sentence. An optional third element is the first DBAL
+ * release whose suite has the test, such as '4.5.1'; the entry applies only to
+ * that DBAL version and later. run.php fails on an entry that names no test,
  * and reports entries whose tests pass again.
  */
 
@@ -146,6 +148,11 @@ return [
         'Doctrine\DBAL\Tests\Functional\ForeignKeyConstraintViolationsTest::testCommitViolatesConstraintWhileUsingTransactionNesting' => [
             'alter-without-comparator',
             'setUp() adds the foreign key to an existing table with createForeignKey().',
+        ],
+        'Doctrine\DBAL\Tests\Functional\ForeignKeyConstraintViolationsTest::testAutoCommitIsRestoredAfterCommitViolatesDeferredConstraint' => [
+            'alter-without-comparator',
+            'setUp() adds the foreign key to an existing table with createForeignKey().',
+            '4.5.1',
         ],
         'Doctrine\DBAL\Tests\Functional\Schema\SchemaManagerTest::testDropForeignKey' => [
             'alter-without-comparator',

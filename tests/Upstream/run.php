@@ -25,7 +25,8 @@ declare(strict_types=1);
  *
  * Pass 1 runs the suite with skiplist.php applied by SkipListExtension. It
  * fails when PHPUnit fails, which means some test outside the skip list failed,
- * or when a skip-list entry matched no test. Pass 2 runs only the listed tests,
+ * or when a skip-list entry matched no test. Entries bound to a newer DBAL
+ * version than the installed one are left out of both passes. Pass 2 runs only the listed tests,
  * and the tests they depend on, without skipping and reports entries whose
  * tests now pass. Entries of an order-dependent category are expected to pass
  * outside the full suite and are not reported as stale.
@@ -74,10 +75,9 @@ function main(array $argv): void
     installDependencies($directory, $root, $suite, $ref, $dbal, $options['offline']);
     copyFile(sprintf('%s/%s/phpunit.xml', __DIR__, $suite), $directory . '/phpunit.duckdb.xml');
 
-    $categories = listedEntries($suite);
-    $entries    = array_keys($categories);
+    [$failed, $applied] = runSkipPass($directory, $options['phpunit']);
 
-    $failed = runSkipPass($directory, $entries, $options['phpunit']);
+    $categories = array_intersect_key(listedEntries($suite), array_flip($applied));
 
     if (! $options['verify']) {
         exit($failed ? 1 : 0);
@@ -280,10 +280,14 @@ function listedEntries(string $suite): array
 }
 
 /**
- * @param list<string> $entries
+ * Returns whether the pass failed and the skip-list entries SkipListExtension
+ * applied to the installed DBAL version.
+ *
  * @param list<string> $phpunitArguments
+ *
+ * @return array{bool, list<string>}
  */
-function runSkipPass(string $directory, array $entries, array $phpunitArguments): bool
+function runSkipPass(string $directory, array $phpunitArguments): array
 {
     section('Pass 1: upstream suite with the skip list applied');
 
@@ -303,11 +307,13 @@ function runSkipPass(string $directory, array $entries, array $phpunitArguments)
     if ($outcomes === null || $problems === null) {
         annotate('error', 'SkipListExtension wrote no report: the skip list is invalid or the extension did not bootstrap. See the PHPUnit warning above.');
 
-        return true;
+        return [true, []];
     }
 
+    $entries = array_map('strval', array_keys($outcomes));
+
     if ($phpunitArguments !== []) {
-        return $failed;
+        return [$failed, $entries];
     }
 
     foreach ($entries as $key) {
@@ -323,7 +329,7 @@ function runSkipPass(string $directory, array $entries, array $phpunitArguments)
         $failed = true;
     }
 
-    return $failed;
+    return [$failed, $entries];
 }
 
 /**

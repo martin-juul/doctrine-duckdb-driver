@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace MartinJuul\DBAL\DuckDB\Tests\Upstream;
 
+use Composer\InstalledVersions;
 use InvalidArgumentException;
 use PHPUnit\Event\Code\TestMethod;
 use PHPUnit\Event\Subscriber;
@@ -53,6 +54,7 @@ use function method_exists;
 use function preg_match;
 use function sprintf;
 use function str_starts_with;
+use function version_compare;
 
 use const JSON_PRETTY_PRINT;
 use const JSON_THROW_ON_ERROR;
@@ -63,6 +65,9 @@ use const JSON_UNESCAPED_SLASHES;
  * "[category] reason" message. Works with PHPUnit 10, 11 and 12.
  *
  * Parameters (phpunit.xml): `suite` selects the list (`dbal` or `orm`).
+ * Entries that name a minimum DBAL version apply only when the installed
+ * doctrine/dbal is that version or later, so a test that a newer DBAL adds can
+ * be listed without breaking the run against an older one.
  * Environment: `DUCKDB_UPSTREAM_MODE=verify` runs listed tests instead of
  * skipping them, so the runner can report entries whose tests now pass, and
  * `DUCKDB_UPSTREAM_REPORT` names a JSON file that receives the outcome of every
@@ -82,6 +87,8 @@ final class SkipListExtension implements Extension
 
     private const string KEY_PATTERN = '/^(?<class>[A-Za-z_][A-Za-z0-9_\\\\]*)::(?<method>[A-Za-z_][A-Za-z0-9_]*)(?:#(?<dataSet>.+))?$/';
 
+    private const string VERSION_PATTERN = '/^\d+\.\d+\.\d+$/';
+
     /** @var array<string, string> skip message per entry key */
     private array $messages = [];
 
@@ -98,7 +105,7 @@ final class SkipListExtension implements Extension
     {
         $suite = $parameters->has('suite') ? $parameters->get('suite') : '';
 
-        $this->messages = self::loadSkipList(__DIR__ . '/skiplist.php', $suite);
+        $this->messages = self::loadSkipList(__DIR__ . '/skiplist.php', $suite, self::installedDbalVersion());
         $this->mode     = self::resolveMode();
 
         foreach ($this->messages as $key => $message) {
@@ -109,13 +116,16 @@ final class SkipListExtension implements Extension
     }
 
     /**
-     * Loads and validates the skip list of one suite.
+     * Loads and validates the skip list of one suite, keeping the entries that
+     * apply to the given DBAL version.
+     *
+     * @param string $dbalVersion normalized doctrine/dbal version, such as 4.5.0.0 or 4.6.9999999.9999999-dev
      *
      * @return array<string, string> "[category] reason" per entry key
      *
      * @throws InvalidArgumentException When the list is malformed or names a missing test.
      */
-    public static function loadSkipList(string $path, string $suite): array
+    public static function loadSkipList(string $path, string $suite, string $dbalVersion): array
     {
         $list = require $path;
 
@@ -147,18 +157,24 @@ final class SkipListExtension implements Extension
 
         foreach ($list[$suite] as $key => $entry) {
             $key   = (string) $key;
-            $pair  = self::sentencePair($entry);
-            $error = $pair === null
-                ? sprintf('%s: entry must be [category, reason sentence]', $key)
-                : self::validateEntry($key, $pair[0], $labels);
+            $parts = self::entryParts($entry);
+            $error = $parts === null
+                ? sprintf('%s: entry must be [category, reason sentence] or [category, reason sentence, minimum DBAL version such as "4.5.1"]', $key)
+                : self::validateEntry($key, $parts[0], $labels);
 
-            if ($error !== null || $pair === null) {
+            if ($error !== null || $parts === null) {
                 $errors[] = $error;
 
                 continue;
             }
 
-            $messages[$key] = sprintf('[%s] %s', $labels[$pair[0]], $pair[1]);
+            [$category, $reason, $since] = $parts;
+
+            if ($since !== null && version_compare($dbalVersion, $since, '<')) {
+                continue;
+            }
+
+            $messages[$key] = sprintf('[%s] %s', $labels[$category], $reason);
         }
 
         if ($errors !== []) {
@@ -215,6 +231,33 @@ final class SkipListExtension implements Extension
     }
 
     /**
+     * Splits a skip-list entry into its category, reason and optional minimum
+     * DBAL version, or returns null when the entry is malformed.
+     *
+     * @return array{string, string, string|null}|null
+     */
+    private static function entryParts(mixed $entry): array|null
+    {
+        if (! is_array($entry) || ! array_is_list($entry) || count($entry) < 2 || count($entry) > 3) {
+            return null;
+        }
+
+        $pair = self::sentencePair([$entry[0], $entry[1]]);
+
+        if ($pair === null) {
+            return null;
+        }
+
+        $since = $entry[2] ?? null;
+
+        if ($since !== null && (! is_string($since) || preg_match(self::VERSION_PATTERN, $since) !== 1)) {
+            return null;
+        }
+
+        return [$pair[0], $pair[1], $since];
+    }
+
+    /**
      * Returns [name, sentence] when the value is a two-element list whose
      * second element reads as a sentence.
      *
@@ -233,6 +276,17 @@ final class SkipListExtension implements Extension
         }
 
         return [$name, $sentence];
+    }
+
+    private static function installedDbalVersion(): string
+    {
+        $version = InstalledVersions::isInstalled('doctrine/dbal') ? InstalledVersions::getVersion('doctrine/dbal') : null;
+
+        if ($version === null) {
+            throw new InvalidArgumentException('The installed doctrine/dbal version is unknown, so version-bound skip-list entries cannot be applied.');
+        }
+
+        return $version;
     }
 
     private static function resolveMode(): string
