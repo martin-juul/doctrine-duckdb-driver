@@ -6,6 +6,8 @@ namespace MartinJuul\DBAL\DuckDB\Tests\Unit\Schema;
 
 use Doctrine\DBAL\Schema\Column;
 use Doctrine\DBAL\Schema\ComparatorConfig;
+use Doctrine\DBAL\Schema\DefaultExpression\CurrentDate;
+use Doctrine\DBAL\Schema\DefaultExpression\CurrentTimestamp;
 use Doctrine\DBAL\Schema\ForeignKeyConstraint;
 use Doctrine\DBAL\Schema\Index;
 use Doctrine\DBAL\Schema\PrimaryKeyConstraint;
@@ -61,6 +63,51 @@ final class AlterRoutingTest extends TestCase
             self::table(extra: $withDefault),
             true,
             null,
+        ];
+
+        yield 'NOT NULL column with a CURRENT_TIMESTAMP default' => [
+            self::table(),
+            self::table(extra: Column::editor()
+                ->setUnquotedName('extra')
+                ->setTypeName(Types::DATETIME_IMMUTABLE)
+                ->setDefaultValue(new CurrentTimestamp())
+                ->create()),
+            false,
+            null,
+        ];
+
+        yield 'NOT NULL column with a CURRENT_DATE default' => [
+            self::table(),
+            self::table(extra: Column::editor()
+                ->setUnquotedName('extra')
+                ->setTypeName(Types::DATE_IMMUTABLE)
+                ->setDefaultValue(new CurrentDate())
+                ->create()),
+            false,
+            null,
+        ];
+
+        yield 'nullable column with a CURRENT_TIMESTAMP default' => [
+            self::table(indexed: true),
+            self::table(indexed: true, extra: Column::editor()
+                ->setUnquotedName('extra')
+                ->setTypeName(Types::DATETIME_IMMUTABLE)
+                ->setDefaultValue(new CurrentTimestamp())
+                ->setNotNull(false)
+                ->create()),
+            false,
+            ['ALTER TABLE "t" ADD COLUMN "extra" TIMESTAMP_S DEFAULT CURRENT_TIMESTAMP'],
+        ];
+
+        yield 'NOT NULL column with a negative numeric default' => [
+            self::table(),
+            self::table(extra: Column::editor()
+                ->setUnquotedName('extra')
+                ->setTypeName(Types::FLOAT)
+                ->setDefaultValue(-1.5)
+                ->create()),
+            false,
+            ['ALTER TABLE "t" ADD COLUMN "extra" DOUBLE DEFAULT -1.5 NOT NULL'],
         ];
 
         yield 'NOT NULL column without a default' => [

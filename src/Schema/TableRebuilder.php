@@ -24,6 +24,7 @@ use function array_diff_key;
 use function array_flip;
 use function array_key_exists;
 use function array_keys;
+use function array_map;
 use function array_merge;
 use function array_reverse;
 use function count;
@@ -31,9 +32,11 @@ use function implode;
 use function is_numeric;
 use function preg_match_all;
 use function rtrim;
+use function spl_object_id;
 use function sprintf;
 use function str_replace;
 use function str_starts_with;
+use function strcasecmp;
 use function strlen;
 use function strpos;
 use function strtolower;
@@ -325,6 +328,7 @@ final class TableRebuilder
      */
     private function tableSteps(array $rebuilds, array $created, array $dropped): array
     {
+        $rebuilds = array_map($this->withDeclaredColumnNames(...), $rebuilds);
         $steps    = [];
         $reused   = [];
         $orphaned = [];
@@ -898,15 +902,81 @@ final class TableRebuilder
         $sorted[] = $key;
     }
 
+    /**
+     * The rebuild with each copied column of the new table under the name
+     * that CREATE TABLE declares it with.
+     *
+     * DBAL's deprecated Table::renameColumn() changes only that name, and
+     * leaves the column's object name, which the copy statements use, at the
+     * old name. Such a column keeps the object name of the old column it
+     * comes from, under a different declared name.
+     *
+     * @param Rebuild $rebuild
+     *
+     * @return Rebuild
+     */
+    private function withDeclaredColumnNames(array $rebuild): array
+    {
+        $renamed = [];
+
+        foreach ($rebuild['columns'] as $position => [$oldColumn, $newColumn]) {
+            $declared = $newColumn->toArray(true)['name'];
+
+            if (
+                strcasecmp(self::identifier($oldColumn), self::identifier($newColumn)) !== 0
+                || strcasecmp($oldColumn->toArray(true)['name'], $declared) === 0
+            ) {
+                continue;
+            }
+
+            $current = self::copy($newColumn, $this->platform->quoteSingleIdentifier($declared), []);
+
+            $renamed[spl_object_id($newColumn)] = $current;
+            $rebuild['columns'][$position]      = [$oldColumn, $current];
+        }
+
+        if (count($renamed) === 0) {
+            return $rebuild;
+        }
+
+        $columns = [];
+
+        foreach ($rebuild['new']->getColumns() as $column) {
+            $columns[] = $renamed[spl_object_id($column)] ?? $column;
+        }
+
+        $rebuild['new'] = $rebuild['new']->edit()->setColumns(...$columns)->create();
+
+        return $rebuild;
+    }
+
+    private static function identifier(Column $column): string
+    {
+        return $column->getObjectName()->getIdentifier()->getValue();
+    }
+
     /** A copy of the column with one platform option set; Column::edit() would drop the package's options. */
     private static function withPlatformOption(Column $column, string $name, mixed $value): Column
+    {
+        return self::copy($column, $column->getObjectName()->toString(), [$name => $value]);
+    }
+
+    /**
+     * A copy of the column under the given name, with the given platform
+     * options added to its own.
+     *
+     * @param array<string, mixed> $addedPlatformOptions
+     */
+    private static function copy(Column $column, string $name, array $addedPlatformOptions): Column
     {
         $properties      = $column->toArray(true);
         $platformOptions = array_diff_key($properties, array_flip(self::COLUMN_PROPERTIES));
 
-        $platformOptions[$name] = $value;
+        foreach ($addedPlatformOptions as $option => $value) {
+            $platformOptions[$option] = $value;
+        }
 
-        return new Column($column->getObjectName()->toString(), $column->getTypeName(), [
+        return new Column($name, $column->getTypeName(), [
             'length' => $column->getLength(),
             'precision' => $column->getPrecision(),
             'scale' => $column->getScale(),

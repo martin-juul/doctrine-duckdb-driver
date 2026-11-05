@@ -386,7 +386,7 @@ class DuckDBSchemaManager extends AbstractSchemaManager
 
         $rows = [];
 
-        foreach ($this->metadataProvider->fetchColumns($schema, $table) as $column) {
+        foreach ($this->metadataProvider->fetchColumns($schema, $table, $this->quoteIfNeeded(...)) as $column) {
             $rows[] = [
                 'schema_name' => $column['schema'],
                 'table_name' => $column['table'],

@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace MartinJuul\DBAL\DuckDB\Schema;
 
+use Closure;
 use Doctrine\DBAL\Connection;
 use Doctrine\DBAL\Exception;
 use Doctrine\DBAL\Result;
@@ -11,6 +12,7 @@ use Doctrine\DBAL\Schema\Column;
 use Doctrine\DBAL\Schema\DefaultExpression\CurrentDate;
 use Doctrine\DBAL\Schema\DefaultExpression\CurrentTime;
 use Doctrine\DBAL\Schema\DefaultExpression\CurrentTimestamp;
+use Doctrine\DBAL\Schema\Exception\UnsupportedName;
 use Doctrine\DBAL\Schema\ForeignKeyConstraint\MatchType;
 use Doctrine\DBAL\Schema\ForeignKeyConstraint\ReferentialAction;
 use Doctrine\DBAL\Schema\Index\IndexType;
@@ -30,6 +32,7 @@ use Doctrine\DBAL\Schema\Name\OptionallyQualifiedName;
 use Doctrine\DBAL\Types\BooleanType;
 use Doctrine\DBAL\Types\PhpDateMappingType;
 use Doctrine\DBAL\Types\PhpDateTimeMappingType;
+use Doctrine\DBAL\Types\PhpIntegerMappingType;
 use Doctrine\DBAL\Types\PhpTimeMappingType;
 use Doctrine\DBAL\Types\Type;
 use MartinJuul\DBAL\DuckDB\Platform\DuckDBPlatform;
@@ -130,6 +133,10 @@ final readonly class DuckDBMetadataProvider implements MetadataProvider
     /** {@inheritDoc} */
     public function getTableColumnsForTable(string|null $schemaName, string $tableName): iterable
     {
+        if ($schemaName === null) {
+            throw UnsupportedName::fromNullSchemaName(__METHOD__);
+        }
+
         return $this->getTableColumns($schemaName, $tableName);
     }
 
@@ -150,6 +157,10 @@ final readonly class DuckDBMetadataProvider implements MetadataProvider
     /** {@inheritDoc} */
     public function getIndexColumnsForTable(string|null $schemaName, string $tableName): iterable
     {
+        if ($schemaName === null) {
+            throw UnsupportedName::fromNullSchemaName(__METHOD__);
+        }
+
         return $this->getIndexColumns($schemaName, $tableName);
     }
 
@@ -181,6 +192,10 @@ final readonly class DuckDBMetadataProvider implements MetadataProvider
     /** {@inheritDoc} */
     public function getPrimaryKeyConstraintColumnsForTable(string|null $schemaName, string $tableName): iterable
     {
+        if ($schemaName === null) {
+            throw UnsupportedName::fromNullSchemaName(__METHOD__);
+        }
+
         return $this->getPrimaryKeyConstraintColumns($schemaName, $tableName);
     }
 
@@ -220,6 +235,10 @@ final readonly class DuckDBMetadataProvider implements MetadataProvider
      */
     public function getUniqueConstraintColumnsForTable(string|null $schemaName, string $tableName): iterable
     {
+        if ($schemaName === null) {
+            throw UnsupportedName::fromNullSchemaName(__METHOD__);
+        }
+
         return [];
     }
 
@@ -232,6 +251,10 @@ final readonly class DuckDBMetadataProvider implements MetadataProvider
     /** {@inheritDoc} */
     public function getForeignKeyConstraintColumnsForTable(string|null $schemaName, string $tableName): iterable
     {
+        if ($schemaName === null) {
+            throw UnsupportedName::fromNullSchemaName(__METHOD__);
+        }
+
         return $this->getForeignKeyConstraintColumns($schemaName, $tableName);
     }
 
@@ -268,6 +291,10 @@ final readonly class DuckDBMetadataProvider implements MetadataProvider
     /** {@inheritDoc} */
     public function getTableOptionsForTable(string|null $schemaName, string $tableName): iterable
     {
+        if ($schemaName === null) {
+            throw UnsupportedName::fromNullSchemaName(__METHOD__);
+        }
+
         return $this->getTableOptions($schemaName, $tableName);
     }
 
@@ -434,26 +461,31 @@ final readonly class DuckDBMetadataProvider implements MetadataProvider
     }
 
     /**
+     * @param (Closure(non-empty-string): non-empty-string)|null $nameSQL Writes a column name as SQL; quoted when
+     *                                                                     not given.
+     *
      * @return list<array{schema: non-empty-string, table: non-empty-string, column: Column}>
      *
      * @throws Exception
      */
-    public function fetchColumns(string|null $schemaName, string|null $tableName): array
+    public function fetchColumns(string|null $schemaName, string|null $tableName, Closure|null $nameSQL = null): array
     {
-        $columns = [];
-        $bounds  = $this->fetchBounds($schemaName, $tableName);
+        $columns   = [];
+        $bounds    = $this->fetchBounds($schemaName, $tableName);
+        $nameSQL ??= $this->platform->quoteSingleIdentifier(...);
 
         foreach ($this->selectColumns($schemaName, $tableName)->iterateNumeric() as $row) {
             [$schema, $table, $name, $dataType, $nullable, $default, $comment] = $row;
 
             $schema = self::nonEmptyString($schema);
-            $bound  = $bounds[self::objectKey($schema, self::nonEmptyString($table)) . "\0" . self::nonEmptyString($name)] ?? [];
+            $name   = self::nonEmptyString($name);
+            $bound  = $bounds[self::objectKey($schema, self::nonEmptyString($table)) . "\0" . $name] ?? [];
 
             $columns[] = [
                 'schema' => $schema,
                 'table' => self::nonEmptyString($table),
                 'column' => $this->createColumn(
-                    self::nonEmptyString($name),
+                    self::nonEmptyString($nameSQL($name)),
                     self::nonEmptyString($dataType),
                     (bool) $nullable,
                     is_string($default) ? $default : null,
@@ -857,7 +889,7 @@ final readonly class DuckDBMetadataProvider implements MetadataProvider
      * the table's schema when given, is kept in the platform option
      * {@see DuckDBPlatform::OWNED_SEQUENCE_OPTION}.
      *
-     * @param non-empty-string  $name
+     * @param non-empty-string  $name       The column's name as SQL, as {@see fetchColumns()} writes it.
      * @param non-empty-string  $dataType
      * @param ?non-empty-string $schemaName The schema of the column's table.
      * @param int|float|null    $minimum    The bound of a `col >= n` CHECK, kept as the `min` platform option.
@@ -889,7 +921,7 @@ final readonly class DuckDBMetadataProvider implements MetadataProvider
         ];
 
         if ($ownedSequence === null) {
-            $options['default'] = self::normalizeDefault($default, $typeName);
+            $options['default'] = self::normalizeDefault($default, $typeName, $dataType);
         } else {
             $options['autoincrement'] = true;
 
@@ -928,7 +960,7 @@ final readonly class DuckDBMetadataProvider implements MetadataProvider
             $options['platformOptions'] = $platformOptions;
         }
 
-        return new Column($this->platform->quoteSingleIdentifier($name), $typeName, $options);
+        return new Column($name, $typeName, $options);
     }
 
     /**
@@ -936,11 +968,16 @@ final readonly class DuckDBMetadataProvider implements MetadataProvider
      * declares, so the platform renders the same DEFAULT clause again.
      *
      * NULL becomes null, a string literal its unquoted value, the current
-     * date and time functions DBAL's default expressions, boolean and numeric
-     * literals PHP scalars. Any other expression, including `nextval(...)`,
-     * is returned as written.
+     * date and time functions DBAL's default expressions, also on a native
+     * column of a TIMESTAMP or TIME type, boolean and numeric literals PHP
+     * scalars. Any other expression, such as `concat('a', 'b')`, is returned
+     * as written on an integer column, whose defaults DBAL renders as written,
+     * and as a {@see RawDefaultExpression} on any other column, whose string
+     * defaults DBAL would render as string literals.
+     *
+     * @param string $dataType The column's DuckDB type, which tells the time types of native columns apart.
      */
-    public static function normalizeDefault(string|null $expression, string $typeName): mixed
+    public static function normalizeDefault(string|null $expression, string $typeName, string $dataType = ''): mixed
     {
         if ($expression === null) {
             return null;
@@ -958,9 +995,10 @@ final readonly class DuckDBMetadataProvider implements MetadataProvider
 
         $type     = Type::getType($typeName);
         $function = strtolower($expression);
+        $native   = $type instanceof NativeType;
 
         if (
-            $type instanceof PhpDateTimeMappingType
+            ($type instanceof PhpDateTimeMappingType || ($native && preg_match('/^TIMESTAMP/i', $dataType) === 1))
             && in_array($function, ['current_timestamp', 'current_timestamp()', 'now()', 'get_current_timestamp()'], true)
         ) {
             return new CurrentTimestamp();
@@ -970,7 +1008,10 @@ final readonly class DuckDBMetadataProvider implements MetadataProvider
             return new CurrentDate();
         }
 
-        if ($type instanceof PhpTimeMappingType && in_array($function, ['current_time', 'current_time()', 'get_current_time()'], true)) {
+        if (
+            ($type instanceof PhpTimeMappingType || ($native && preg_match('/^TIME(?!STAMP)/i', $dataType) === 1))
+            && in_array($function, ['current_time', 'current_time()', 'get_current_time()'], true)
+        ) {
             return new CurrentTime();
         }
 
@@ -988,7 +1029,11 @@ final readonly class DuckDBMetadataProvider implements MetadataProvider
             return (float) $expression;
         }
 
-        return $expression;
+        if ($type instanceof PhpIntegerMappingType) {
+            return $expression;
+        }
+
+        return new RawDefaultExpression($expression);
     }
 
     /**

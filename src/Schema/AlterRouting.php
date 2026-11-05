@@ -23,6 +23,7 @@ use function get_debug_type;
 use function implode;
 use function in_array;
 use function is_scalar;
+use function preg_match;
 use function strlen;
 use function strtolower;
 use function substr;
@@ -35,11 +36,12 @@ use function substr;
  * so the decision is static. DuckDB can add a nullable column, or one with a
  * default, change or drop a default and change comments on any table. It
  * can set NOT NULL, change a type, add a primary key, add a NOT NULL column
- * with a default and drop a column only when no index exists and no foreign
- * key references the table, because DuckDB refuses to alter a table that
- * other catalog entries depend on. Dropping a column of a table that owns a
- * foreign key always rebuilds, because DuckDB then loses the key's catalog
- * dependency. Everything else, including renames, NOT NULL removal,
+ * with a literal default and drop a column only when no index exists and no
+ * foreign key references the table, because DuckDB refuses to alter a table
+ * that other catalog entries depend on. A NOT NULL column whose default is
+ * not a literal, such as CURRENT_TIMESTAMP, always rebuilds. Dropping a
+ * column of a table that owns a foreign key always rebuilds, because DuckDB
+ * then loses the key's catalog dependency. Everything else, including renames, NOT NULL removal,
  * autoincrement and CHECK changes and every foreign-key change, needs a
  * rebuild.
  *
@@ -362,7 +364,10 @@ final class AlterRouting
             $column->getAutoincrement()
             || self::hasCheck($column)
             || $column->getColumnDefinition() !== null
-            || ($column->getNotnull() && ($column->getDefault() === null || $blocked))
+            || (
+                $column->getNotnull()
+                && ($column->getDefault() === null || $blocked || ! self::isLiteral($this->defaultSQL($column)))
+            )
         ) {
             return null;
         }
@@ -417,6 +422,18 @@ final class AlterRouting
         }
 
         return substr($declaration, strlen(' DEFAULT '));
+    }
+
+    /**
+     * Whether a default expression is a literal. DuckDB adds a NOT NULL column
+     * to a table with rows only when its default is one; any other default,
+     * such as CURRENT_TIMESTAMP, fails with "Cannot create index with
+     * outstanding updates", even when the column is added nullable and then
+     * set NOT NULL in the same transaction.
+     */
+    private static function isLiteral(string $default): bool
+    {
+        return preg_match('/^(?:-?\d+(?:\.\d+)?(?:E[+-]?\d+)?|\'(?:[^\']|\'\')*\'|true|false)$/i', $default) === 1;
     }
 
     /** Whether the table has an index other than its primary key; DuckDB refuses most ALTERs then. */
