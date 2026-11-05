@@ -67,7 +67,12 @@ runs:
         ./configure --with-duckdb=/opt/duckdb
         make -j"$(nproc)"
         sudo make install
-        ini_dir="$(php --ini | sed -n 's/^Scan for additional .ini files in: //p')"
+        # PHP 8.5's php --ini quotes the directory; the constant never does.
+        ini_dir="$(php -r 'echo PHP_CONFIG_FILE_SCAN_DIR;')"
+        if [ -z "$ini_dir" ]; then
+          echo "PHP was built without an additional .ini scan directory" >&2
+          exit 1
+        fi
         echo 'extension=duckdb' | sudo tee "$ini_dir/99-duckdb.ini" > /dev/null
         echo "LD_LIBRARY_PATH=/opt/duckdb/lib" >> "$GITHUB_ENV"
         LD_LIBRARY_PATH=/opt/duckdb/lib php -r 'echo "ext-duckdb ", phpversion("duckdb"), " on DuckDB ", DuckDB\version(), PHP_EOL;'
