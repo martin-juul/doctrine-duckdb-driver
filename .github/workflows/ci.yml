@@ -13,6 +13,7 @@ jobs:
   test:
     name: PHP ${{ matrix.php }} / DBAL ${{ matrix.dbal }}
     runs-on: ubuntu-24.04
+    timeout-minutes: 60
     continue-on-error: ${{ matrix.experimental }}
     strategy:
       fail-fast: false

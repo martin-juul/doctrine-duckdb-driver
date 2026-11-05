@@ -396,6 +396,41 @@ function runVerifyPass(string $directory, array $categories, array $phpunitArgum
         $stale[] = $key;
     }
 
+    // A test that fails partway through a transaction can leave the shared
+    // connection unusable for the tests after it, so an entry that did not run
+    // or passed among the others is run again on its own before it is reported.
+    $confirmedStale  = [];
+    $confirmedNotRun = [];
+
+    foreach ([...$notRun, ...$stale] as $index => $key) {
+        $report = sprintf('%s/.duckdb-verify-alone-report-%d.json', $directory, $index);
+        $log    = sprintf('%s/.duckdb-verify-alone-%d.log', $directory, $index);
+        @unlink($report);
+
+        runPhpUnit($directory, 'verify', $report, [...$phpunitArguments, '--filter', verifyFilters($directory, [$key])[0]], $log);
+
+        $counts = readReport($report)[$key] ?? [];
+
+        if (! is_array($counts) || $counts === []) {
+            $confirmedNotRun[] = $key;
+            $logs[]            = $log;
+
+            continue;
+        }
+
+        if (array_keys($counts) === ['passed']) {
+            $confirmedStale[] = $key;
+            $logs[]           = $log;
+
+            continue;
+        }
+
+        fwrite(STDOUT, sprintf("Skip-list entry %s fails when run on its own; its verification-pass result came from test order, so it stays listed.\n", $key));
+    }
+
+    $stale  = $confirmedStale;
+    $notRun = $confirmedNotRun;
+
     foreach ($notRun as $key) {
         annotate('warning', sprintf('Skip-list entry %s did not run in the verification pass (PHPUnit output: %s).', $key, implode(', ', $logs)));
     }
