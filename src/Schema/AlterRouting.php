@@ -437,7 +437,7 @@ final class AlterRouting
     }
 
     /** Whether the table has an index other than its primary key; DuckDB refuses most ALTERs then. */
-    private static function hasIndex(Table $table): bool
+    public static function hasIndex(Table $table): bool
     {
         foreach ($table->getIndexes() as $index) {
             if (! $index->isPrimary()) {

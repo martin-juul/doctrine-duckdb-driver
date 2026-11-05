@@ -24,7 +24,6 @@ use MartinJuul\DBAL\DuckDB\Platform\ForeignKeyCycles;
 use function array_keys;
 use function array_map;
 use function array_merge;
-use function array_pop;
 use function count;
 use function implode;
 use function in_array;
@@ -142,19 +141,7 @@ final class DuckDBComparator extends Comparator
      */
     public static function assertNoGeneratedColumns(Connection $connection, array $tables): void
     {
-        foreach (self::readGeneratedColumns($connection) as $key => $column) {
-            if (! isset($tables[$key])) {
-                continue;
-            }
-
-            throw new NotSupported(sprintf(
-                'Cannot rebuild table %s: its column %s.%s is a generated column, which DuckDB 2.0 reports like a '
-                    . 'plain column with a default, so a rebuild would turn it into one.',
-                $tables[$key]->getObjectName()->toString(),
-                $tables[$key]->getObjectName()->getUnqualifiedName()->getValue(),
-                $column,
-            ));
-        }
+        self::refuseGeneratedColumns($connection, $tables, self::readCurrentSchema($connection));
     }
 
     /**
@@ -174,13 +161,62 @@ final class DuckDBComparator extends Comparator
             return $rebuilds;
         }
 
-        $indexes = self::readExpressionIndexes($connection, $platform);
+        return self::addExpressionIndexes($connection, $platform, $rebuilds, self::readCurrentSchema($connection));
+    }
+
+    /**
+     * Refuses to rebuild tables with generated columns, naming the first such
+     * column.
+     *
+     * @param array<string, Table> $tables The tables, keyed by {@see RebuildPlan::tableKey()}.
+     *
+     * @throws Exception
+     */
+    private static function refuseGeneratedColumns(Connection $connection, array $tables, mixed $currentSchema): void
+    {
+        foreach (self::readGeneratedColumns($connection, $currentSchema) as $key => $column) {
+            if (! isset($tables[$key])) {
+                continue;
+            }
+
+            throw new NotSupported(sprintf(
+                'Cannot rebuild table %s: its column %s.%s is a generated column, which DuckDB 2.0 reports like a '
+                    . 'plain column with a default, so a rebuild would turn it into one.',
+                $tables[$key]->getObjectName()->toString(),
+                $tables[$key]->getObjectName()->getUnqualifiedName()->getValue(),
+                $column,
+            ));
+        }
+    }
+
+    /**
+     * Adds to each rebuild the indexes on expressions of its old table.
+     *
+     * @param array<string, Rebuild> $rebuilds The rebuilds, keyed by {@see RebuildPlan::tableKey()}.
+     *
+     * @return array<string, Rebuild>
+     *
+     * @throws Exception
+     */
+    private static function addExpressionIndexes(
+        Connection $connection,
+        DuckDBPlatform $platform,
+        array $rebuilds,
+        mixed $currentSchema,
+    ): array {
+        $indexes = self::readExpressionIndexes($connection, $platform, $currentSchema);
 
         foreach (array_keys($rebuilds) as $key) {
             $rebuilds[$key]['expressionIndexes'] = $indexes[$key] ?? [];
         }
 
         return $rebuilds;
+    }
+
+    /** @throws Exception */
+    private static function readCurrentSchema(Connection $connection): mixed
+    {
+        return $connection->fetchOne('SELECT current_schema()');
     }
 
     protected function columnsEqual(Column $column1, Column $column2): bool
@@ -203,35 +239,33 @@ final class DuckDBComparator extends Comparator
         array $oldOmitted,
         array $newOmitted,
     ): RebuildPlan {
-        $oldTables     = self::byKey(array_map(
+        $oldTables     = RebuildPlan::byKey(array_map(
             fn (Table $table): Table => $this->asCreated($table, $oldOmitted),
             $oldSchema->getTables(),
         ));
-        $newTables     = self::byKey(array_map(
+        $newTables     = RebuildPlan::byKey(array_map(
             fn (Table $table): Table => $this->asCreated($table, $newOmitted),
             $newSchema->getTables(),
         ));
         $createdTables = [];
-        $referencedBy  = [];
+        $referencedBy  = RebuildPlan::referencedBy($oldTables);
 
         foreach ($diff->getCreatedTables() as $table) {
             $createdTables[RebuildPlan::tableKey($table->getObjectName())] = $this->asCreated($table, $newOmitted);
         }
 
-        foreach ($oldTables as $key => $table) {
-            foreach ($table->getForeignKeys() as $foreignKey) {
-                $referencedBy[RebuildPlan::tableKey($foreignKey->getReferencedTableName())][$key] = true;
-            }
-        }
-
-        $constraints = $this->connection === null ? [] : self::readKeyConstraints($this->connection);
-        $routing     = new AlterRouting($this->platform);
-        $diffs       = [];
-        $native      = [];
-        $rebuild     = [];
+        $currentSchema = $this->connection?->fetchOne('SELECT current_schema()');
+        $constraints   = null;
+        $routing       = new AlterRouting($this->platform);
+        $diffs         = [];
+        $native        = [];
+        $rebuild       = [];
 
         foreach ($diff->getAlteredTables() as $tableDiff) {
             $key = RebuildPlan::tableKey($tableDiff->getOldTable()->getObjectName());
+
+            $constraints ??= $this->readKeyConstraints($currentSchema);
+
             $sql = $routing->nativeSQL(
                 $tableDiff,
                 isset($referencedBy[$key]),
@@ -270,29 +304,20 @@ final class DuckDBComparator extends Comparator
                 isset($createdTables[$parent])
                 || isset($rebuild[$parent])
                 || ! isset($oldTables[$parent], $newTables[$parent])
-                || $this->hasKeyConstraint($oldTables, $parent, $foreignKey, $constraints)
             ) {
+                continue;
+            }
+
+            $constraints ??= $this->readKeyConstraints($currentSchema);
+
+            if ($this->hasKeyConstraint($oldTables, $parent, $foreignKey, $constraints)) {
                 continue;
             }
 
             $rebuild[$parent] = true;
         }
 
-        $queue = array_keys($rebuild);
-
-        while (count($queue) > 0) {
-            $key = array_pop($queue);
-
-            foreach (array_keys($referencedBy[$key] ?? []) as $child) {
-                if (isset($rebuild[$child]) || ! isset($newTables[$child])) {
-                    continue;
-                }
-
-                $rebuild[$child] = true;
-                $queue[]         = $child;
-            }
-        }
-
+        $rebuild  = RebuildPlan::referencingClosure($rebuild, $referencedBy, $newTables);
         $rebuilds = [];
 
         foreach (array_keys($rebuild) as $key) {
@@ -308,9 +333,11 @@ final class DuckDBComparator extends Comparator
                 $rebuilt[$key] = $entry['old'];
             }
 
-            self::assertNoGeneratedColumns($this->connection, $rebuilt);
+            self::refuseGeneratedColumns($this->connection, $rebuilt, $currentSchema);
 
-            $rebuilds = self::withExpressionIndexes($this->connection, $this->platform, $rebuilds);
+            if (count($rebuilds) > 0) {
+                $rebuilds = self::addExpressionIndexes($this->connection, $this->platform, $rebuilds, $currentSchema);
+            }
         }
 
         return new RebuildPlan($native, $rebuilds, $newOmitted, $oldOmitted);
@@ -355,22 +382,6 @@ final class DuckDBComparator extends Comparator
         }
 
         return false;
-    }
-
-    /**
-     * @param array<Table> $tables
-     *
-     * @return array<string, Table>
-     */
-    private static function byKey(array $tables): array
-    {
-        $byKey = [];
-
-        foreach ($tables as $table) {
-            $byKey[RebuildPlan::tableKey($table->getObjectName())] = $table;
-        }
-
-        return $byKey;
     }
 
     /**
@@ -502,16 +513,7 @@ final class DuckDBComparator extends Comparator
                 continue;
             }
 
-            return $foreignKey->edit()
-                ->setReferencingColumnNames(...array_map(
-                    static fn (int $position): UnqualifiedName => $referencingColumns[$position],
-                    $order,
-                ))
-                ->setReferencedColumnNames(...array_map(
-                    static fn (int $position): UnqualifiedName => $referencedColumns[$position],
-                    $order,
-                ))
-                ->create();
+            return RebuildPlan::reorderForeignKey($foreignKey, $order);
         }
 
         return $foreignKey;
@@ -542,12 +544,15 @@ final class DuckDBComparator extends Comparator
      *
      * @throws Exception
      */
-    private static function readKeyConstraints(Connection $connection): array
+    private function readKeyConstraints(mixed $currentSchema): array
     {
-        $currentSchema = $connection->fetchOne('SELECT current_schema()');
-        $constraints   = [];
+        if ($this->connection === null) {
+            return [];
+        }
 
-        $rows = $connection->fetchAllNumeric(<<<'SQL'
+        $constraints = [];
+
+        $rows = $this->connection->fetchAllNumeric(<<<'SQL'
             SELECT schema_name, table_name, constraint_type, constraint_column_names
             FROM duckdb_constraints()
             WHERE database_name = current_database()
@@ -588,10 +593,9 @@ final class DuckDBComparator extends Comparator
      *
      * @throws Exception
      */
-    private static function readGeneratedColumns(Connection $connection): array
+    private static function readGeneratedColumns(Connection $connection, mixed $currentSchema): array
     {
-        $currentSchema = $connection->fetchOne('SELECT current_schema()');
-        $columns       = [];
+        $columns = [];
 
         $rows = $connection->fetchAllNumeric(<<<'SQL'
             SELECT schema_name, table_name, column_name
@@ -621,16 +625,19 @@ final class DuckDBComparator extends Comparator
      *
      * @throws Exception
      */
-    private static function readExpressionIndexes(Connection $connection, DuckDBPlatform $platform): array
-    {
-        $introspected = [];
+    private static function readExpressionIndexes(
+        Connection $connection,
+        DuckDBPlatform $platform,
+        mixed $currentSchema,
+    ): array {
+        $currentSchemaName = is_string($currentSchema) && $currentSchema !== '' ? $currentSchema : null;
+        $introspected      = [];
 
-        foreach ($platform->createMetadataProvider($connection)->fetchIndexes(null, null) as $index) {
+        foreach ($platform->createMetadataProvider($connection)->fetchIndexes(null, null, $currentSchemaName) as $index) {
             $introspected[$index['schema'] . "\0" . $index['table'] . "\0" . $index['name']] = true;
         }
 
-        $currentSchema = $connection->fetchOne('SELECT current_schema()');
-        $indexes       = [];
+        $indexes = [];
 
         $rows = $connection->fetchAllNumeric(<<<'SQL'
             SELECT schema_name, table_name, index_name, is_unique, sql

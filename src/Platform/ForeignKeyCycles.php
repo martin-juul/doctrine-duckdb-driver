@@ -140,12 +140,7 @@ final class ForeignKeyCycles
      */
     private static function edges(array $tables, array $foreignKeys): array
     {
-        $byKey = [];
-
-        foreach ($tables as $table) {
-            $byKey[RebuildPlan::tableKey($table->getObjectName())] = $table;
-        }
-
+        $byKey = RebuildPlan::byKey($tables);
         $edges = [];
 
         foreach ($byKey as $key => $table) {

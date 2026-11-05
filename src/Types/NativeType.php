@@ -26,16 +26,6 @@ final class NativeType extends Type
     /** The column platform option that holds the DuckDB type string. */
     public const string DECLARATION_OPTION = 'duckdb_type';
 
-    /** Registers the type with DBAL unless it is registered already. */
-    public static function register(): void
-    {
-        if (Type::hasType(self::NAME)) {
-            return;
-        }
-
-        Type::addType(self::NAME, self::class);
-    }
-
     /** @param array<string, mixed> $column */
     public function getSQLDeclaration(array $column, AbstractPlatform $platform): string
     {

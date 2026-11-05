@@ -20,7 +20,6 @@ use function is_bool;
 use function is_float;
 use function is_int;
 use function is_string;
-use function str_replace;
 
 /**
  * Doctrine DBAL driver for DuckDB through the native ext-duckdb extension.
@@ -43,7 +42,7 @@ final class Driver implements DriverInterface
         try {
             $database   = new Database($path, $config);
             $connection = $database->connect();
-            $connection->query('SET SESSION TimeZone = ' . self::quoteLiteral(date_default_timezone_get()));
+            $connection->query('SET SESSION TimeZone = ' . Connection::quoteLiteral(date_default_timezone_get()));
         } catch (DuckDBException $e) {
             throw DriverError::fromDuckDB($e);
         }
@@ -109,10 +108,5 @@ final class Driver implements DriverInterface
         }
 
         return $config;
-    }
-
-    private static function quoteLiteral(string $value): string
-    {
-        return "'" . str_replace("'", "''", $value) . "'";
     }
 }

@@ -25,10 +25,8 @@ use MartinJuul\DBAL\DuckDB\Platform\DuckDBPlatform;
 use function array_filter;
 use function array_keys;
 use function array_map;
-use function array_pop;
 use function array_values;
 use function assert;
-use function count;
 use function explode;
 use function fclose;
 use function file_exists;
@@ -225,55 +223,24 @@ class DuckDBSchemaManager extends AbstractSchemaManager
      */
     public function renameTable(string $name, string $newName): void
     {
-        $tables = [];
-
-        foreach ($this->listTables() as $table) {
-            $tables[RebuildPlan::tableKey($table->getObjectName())] = $table;
-        }
-
+        $tables  = RebuildPlan::byKey($this->listTables());
         $oldName = Parsers::parseOptionallyQualifiedName($name);
         $key     = RebuildPlan::tableKey($oldName);
         $table   = $tables[$key] ?? $this->introspectTable($name);
 
-        $referencedBy = [];
+        $referencedBy = RebuildPlan::referencedBy($tables);
 
-        foreach ($tables as $childKey => $child) {
-            foreach ($child->getForeignKeys() as $foreignKey) {
-                $referencedBy[RebuildPlan::tableKey($foreignKey->getReferencedTableName())][$childKey] = true;
-            }
-        }
-
-        $indexed = false;
-
-        foreach ($table->getIndexes() as $index) {
-            if ($index->isPrimary()) {
-                continue;
-            }
-
-            $indexed = true;
-        }
-
-        if (! $indexed && ! isset($referencedBy[$key])) {
+        if (! AlterRouting::hasIndex($table) && ! isset($referencedBy[$key])) {
             $this->connection->executeStatement($this->platform->getRenameTableSQL($name, $newName));
 
             return;
         }
 
         $renamed = Parsers::parseOptionallyQualifiedName($newName);
-        $closure = [$key => $table];
-        $queue   = [$key];
+        $closure = [];
 
-        while (count($queue) > 0) {
-            $parent = array_pop($queue);
-
-            foreach (array_keys($referencedBy[$parent] ?? []) as $childKey) {
-                if (isset($closure[$childKey])) {
-                    continue;
-                }
-
-                $closure[$childKey] = $tables[$childKey];
-                $queue[]            = $childKey;
-            }
+        foreach (array_keys(RebuildPlan::referencingClosure([$key => true], $referencedBy, $tables)) as $closureKey) {
+            $closure[$closureKey] = $closureKey === $key ? $table : $tables[$closureKey];
         }
 
         DuckDBComparator::assertNoGeneratedColumns($this->connection, $closure);
@@ -406,9 +373,11 @@ class DuckDBSchemaManager extends AbstractSchemaManager
     {
         [$schema, $table] = $this->splitTableName($tableName);
 
+        [$primaryKeys, $indexes] = $this->metadataProvider->fetchPrimaryKeysAndIndexes($schema, $table);
+
         $rows = [];
 
-        foreach ($this->metadataProvider->fetchPrimaryKeys($schema, $table) as $primaryKey) {
+        foreach ($primaryKeys as $primaryKey) {
             foreach ($primaryKey['columns'] as $column) {
                 $rows[] = [
                     'schema_name' => $primaryKey['schema'],
@@ -421,7 +390,7 @@ class DuckDBSchemaManager extends AbstractSchemaManager
             }
         }
 
-        foreach ($this->metadataProvider->fetchIndexes($schema, $table) as $index) {
+        foreach ($indexes as $index) {
             foreach ($index['columns'] as $column) {
                 $rows[] = [
                     'schema_name' => $index['schema'],

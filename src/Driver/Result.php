@@ -12,6 +12,7 @@ use DuckDB\FetchMode;
 use DuckDB\Result as NativeResult;
 use MartinJuul\DBAL\DuckDB\Driver\Exception\DriverError;
 
+use function array_combine;
 use function count;
 use function in_array;
 
@@ -25,7 +26,7 @@ final class Result implements ResultInterface
     /** @var list<string>|null */
     private array|null $names = null;
 
-    /** @var list<Closure(mixed): mixed>|null */
+    /** @var array<int, Closure(mixed): mixed>|null The conversions of the columns that need one, by position. */
     private array|null $normalizers = null;
 
     public function __construct(NativeResult $result)
@@ -54,6 +55,10 @@ final class Result implements ResultInterface
         $normalizers = $this->normalizers();
 
         foreach ($row as $index => $value) {
+            if (! isset($normalizers[$index])) {
+                continue;
+            }
+
             $row[$index] = $normalizers[$index]($value);
         }
 
@@ -69,13 +74,7 @@ final class Result implements ResultInterface
             return false;
         }
 
-        $assoc = [];
-
-        foreach ($this->names() as $index => $name) {
-            $assoc[$name] = $row[$index];
-        }
-
-        return $assoc;
+        return array_combine($this->names(), $row);
     }
 
     public function fetchOne(): mixed
@@ -171,7 +170,7 @@ final class Result implements ResultInterface
         return $this->names = $names;
     }
 
-    /** @return list<Closure(mixed): mixed> */
+    /** @return array<int, Closure(mixed): mixed> */
     private function normalizers(): array
     {
         if ($this->normalizers !== null) {
@@ -181,7 +180,13 @@ final class Result implements ResultInterface
         $normalizers = [];
 
         for ($i = 0, $count = count($this->names()); $i < $count; $i++) {
-            $normalizers[] = ValueNormalizer::forColumnType($this->result?->columnType($i) ?? '');
+            $normalize = ValueNormalizer::converterFor($this->result?->columnType($i) ?? '');
+
+            if ($normalize === null) {
+                continue;
+            }
+
+            $normalizers[$i] = $normalize;
         }
 
         return $this->normalizers = $normalizers;

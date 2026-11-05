@@ -14,6 +14,7 @@ use function date_default_timezone_get;
 use function intdiv;
 use function is_string;
 use function sprintf;
+use function str_ends_with;
 use function str_starts_with;
 use function substr;
 
@@ -27,8 +28,23 @@ use function substr;
  */
 final class ValueNormalizer
 {
+    private static string|null $timeZoneName = null;
+
+    private static DateTimeZone|null $timeZone = null;
+
     /** @return Closure(mixed): mixed */
     public static function forColumnType(string $type): Closure
+    {
+        return self::converterFor($type) ?? static fn (mixed $value): mixed => $value;
+    }
+
+    /**
+     * The conversion that values of a column of the type need, or null when
+     * they pass through unchanged.
+     *
+     * @return (Closure(mixed): mixed)|null
+     */
+    public static function converterFor(string $type): Closure|null
     {
         return match (true) {
             $type === 'DATE' => static fn (mixed $value): mixed => $value instanceof DateTimeImmutable
@@ -44,24 +60,33 @@ final class ValueNormalizer
             $type === 'INTERVAL' => static fn (mixed $value): mixed => $value instanceof Interval
                 ? self::formatInterval($value)
                 : $value,
-            default => static fn (mixed $value): mixed => $value,
+            default => null,
         };
     }
 
     /** A naive timestamp: ext-duckdb labels it UTC, so its UTC wall clock is the stored value. */
     private static function formatTimestamp(DateTimeImmutable $value): string
     {
-        if ($value->format('u') === '000000') {
-            return $value->format('Y-m-d H:i:s');
+        $formatted = $value->format('Y-m-d H:i:s.u');
+
+        if (str_ends_with($formatted, '.000000')) {
+            return substr($formatted, 0, -7);
         }
 
-        return $value->format('Y-m-d H:i:s.u');
+        return $formatted;
     }
 
     /** An instant, rendered in PHP's default time zone with its offset. */
     private static function formatTimestampTz(DateTimeImmutable $value): string
     {
-        return $value->setTimezone(new DateTimeZone(date_default_timezone_get()))->format('Y-m-d H:i:sO');
+        $name = date_default_timezone_get();
+
+        if (self::$timeZone === null || self::$timeZoneName !== $name) {
+            self::$timeZone     = new DateTimeZone($name);
+            self::$timeZoneName = $name;
+        }
+
+        return $value->setTimezone(self::$timeZone)->format('Y-m-d H:i:sO');
     }
 
     private static function formatTime(mixed $value): mixed

@@ -7,6 +7,8 @@ namespace MartinJuul\DBAL\DuckDB\Driver;
 use function preg_match;
 use function preg_replace;
 use function rtrim;
+use function str_contains;
+use function substr;
 
 /**
  * Recognises the statements the driver connection handles itself, in exec(),
@@ -30,6 +32,16 @@ final class StatementClassifier
     /** Closes a table rebuild; see REBUILD_BEGIN. */
     public const string REBUILD_END = 'DBAL_DUCKDB_REBUILD_END';
 
+    /**
+     * First characters that no statement the driver handles starts with: an
+     * ASCII letter other than the initials of SAVEPOINT, RELEASE, ROLLBACK,
+     * BEGIN, START, COMMIT, END, ABORT and DBAL_*.
+     */
+    private const string PLAIN_INITIALS = 'FGHIJKLMNOPQTUVWXYZfghijklmnopqtuvwxyz';
+
+    /** First characters that no leading comment or whitespace starts with. */
+    private const string LETTERS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz';
+
     private const string IDENTIFIER = '(?:[A-Za-z_][A-Za-z0-9_$]*|"(?:[^"]|"")+")';
 
     private const string LEADING_COMMENTS = '~\A(?:\s+|--[^\n]*(?:\n|\z)|/\*.*?\*/)*~s';
@@ -44,7 +56,17 @@ final class StatementClassifier
 
     public static function classify(string $sql): StatementKind
     {
-        $statement = rtrim(preg_replace(self::LEADING_COMMENTS, '', $sql) ?? $sql, " \t\n\r\0\x0B;");
+        $first = substr($sql, 0, 1);
+
+        if ($first !== '' && str_contains(self::PLAIN_INITIALS, $first)) {
+            return StatementKind::Plain;
+        }
+
+        if ($first === '' || ! str_contains(self::LETTERS, $first)) {
+            $sql = preg_replace(self::LEADING_COMMENTS, '', $sql) ?? $sql;
+        }
+
+        $statement = rtrim($sql, " \t\n\r\0\x0B;");
 
         return match (true) {
             $statement === self::REBUILD_BEGIN => StatementKind::RebuildBegin,

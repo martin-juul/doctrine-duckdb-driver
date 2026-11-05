@@ -57,6 +57,12 @@ final class Connection implements ConnectionInterface
 
     public function quote(string $value): string
     {
+        return self::quoteLiteral($value);
+    }
+
+    /** The value as an SQL string literal. */
+    public static function quoteLiteral(string $value): string
+    {
         return "'" . str_replace("'", "''", $value) . "'";
     }
 

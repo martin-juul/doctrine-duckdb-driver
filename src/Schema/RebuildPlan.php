@@ -5,12 +5,16 @@ declare(strict_types=1);
 namespace MartinJuul\DBAL\DuckDB\Schema;
 
 use Doctrine\DBAL\Schema\Column;
+use Doctrine\DBAL\Schema\ForeignKeyConstraint;
 use Doctrine\DBAL\Schema\Name\OptionallyQualifiedName;
 use Doctrine\DBAL\Schema\Name\UnqualifiedName;
 use Doctrine\DBAL\Schema\Table;
 use Doctrine\DBAL\Schema\TableDiff;
 
+use function array_keys;
 use function array_map;
+use function array_pop;
+use function count;
 use function implode;
 use function sort;
 use function strtolower;
@@ -143,6 +147,121 @@ final class RebuildPlan
         return strtolower($qualifier->getValue()) . '.' . $key;
     }
 
+    /**
+     * The tables keyed by {@see tableKey()}; of tables with the same key, the
+     * last one wins.
+     *
+     * @param iterable<Table> $tables
+     *
+     * @return array<string, Table>
+     */
+    public static function byKey(iterable $tables): array
+    {
+        $byKey = [];
+
+        foreach ($tables as $table) {
+            $byKey[self::tableKey($table->getObjectName())] = $table;
+        }
+
+        return $byKey;
+    }
+
+    /**
+     * Per referenced table, the tables whose foreign keys reference it, all
+     * keyed by {@see tableKey()}.
+     *
+     * @param array<string, Table> $tables The tables, keyed by {@see tableKey()}.
+     *
+     * @return array<string, array<string, true>>
+     */
+    public static function referencedBy(array $tables): array
+    {
+        $referencedBy = [];
+
+        foreach ($tables as $key => $table) {
+            foreach ($table->getForeignKeys() as $foreignKey) {
+                $referencedBy[self::tableKey($foreignKey->getReferencedTableName())][$key] = true;
+            }
+        }
+
+        return $referencedBy;
+    }
+
+    /**
+     * The given tables and every table of the allowed ones that references
+     * them, transitively, in the order they are reached.
+     *
+     * @param array<string, true>                $keys         The tables to start from, keyed by {@see tableKey()}.
+     * @param array<string, array<string, true>> $referencedBy As {@see referencedBy()} returns it.
+     * @param array<string, Table>               $allowed      The tables that may join, keyed by {@see tableKey()}.
+     *
+     * @return array<string, true>
+     */
+    public static function referencingClosure(array $keys, array $referencedBy, array $allowed): array
+    {
+        $queue = array_keys($keys);
+
+        while (count($queue) > 0) {
+            $key = array_pop($queue);
+
+            foreach (array_keys($referencedBy[$key] ?? []) as $child) {
+                if (isset($keys[$child]) || ! isset($allowed[$child])) {
+                    continue;
+                }
+
+                $keys[$child] = true;
+                $queue[]      = $child;
+            }
+        }
+
+        return $keys;
+    }
+
+    /**
+     * Orders tables so that every table follows the tables it references;
+     * self-references and references to tables outside the set are ignored.
+     *
+     * @param array<string, Table>                      $tables      The tables, keyed by {@see tableKey()}.
+     * @param array<string, list<ForeignKeyConstraint>> $foreignKeys The foreign keys to follow, per table. They form
+     *                                                               no cycle between tables.
+     *
+     * @return list<string> The keys of the tables.
+     */
+    public static function parentsFirst(array $tables, array $foreignKeys): array
+    {
+        $sorted  = [];
+        $visited = [];
+
+        foreach (array_keys($tables) as $key) {
+            self::visit($key, $tables, $foreignKeys, $visited, $sorted);
+        }
+
+        return $sorted;
+    }
+
+    /**
+     * The foreign key with its column pairs in the given order of their
+     * positions.
+     *
+     * @param list<int> $order
+     */
+    public static function reorderForeignKey(ForeignKeyConstraint $foreignKey, array $order): ForeignKeyConstraint
+    {
+        $referencingColumns = $foreignKey->getReferencingColumnNames();
+        $referencedColumns  = $foreignKey->getReferencedColumnNames();
+
+        return $foreignKey->edit()
+            ->setReferencingColumnNames(...array_map(
+                static fn (int $position): UnqualifiedName => $referencingColumns[$position],
+                $order,
+            ))
+            ->setReferencedColumnNames(...array_map(
+                static fn (int $position): UnqualifiedName => $referencedColumns[$position],
+                $order,
+            ))
+            ->create();
+    }
+
     public static function columnKey(Column $column): string
     {
         return strtolower($column->getObjectName()->getIdentifier()->getValue());
@@ -165,5 +284,32 @@ final class RebuildPlan
         sort($names);
 
         return implode("\0", $names);
+    }
+
+    /**
+     * @param array<string, Table>                      $tables
+     * @param array<string, list<ForeignKeyConstraint>> $foreignKeys
+     * @param array<string, true>                       $visited
+     * @param list<string>                              $sorted
+     */
+    private static function visit(string $key, array $tables, array $foreignKeys, array &$visited, array &$sorted): void
+    {
+        if (isset($visited[$key])) {
+            return;
+        }
+
+        $visited[$key] = true;
+
+        foreach ($foreignKeys[$key] ?? [] as $foreignKey) {
+            $parent = self::tableKey($foreignKey->getReferencedTableName());
+
+            if ($parent === $key || ! isset($tables[$parent])) {
+                continue;
+            }
+
+            self::visit($parent, $tables, $foreignKeys, $visited, $sorted);
+        }
+
+        $sorted[] = $key;
     }
 }

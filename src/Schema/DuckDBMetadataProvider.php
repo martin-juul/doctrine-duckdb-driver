@@ -44,8 +44,6 @@ use UnexpectedValueException;
 
 use function array_map;
 use function count;
-use function crc32;
-use function dechex;
 use function get_debug_type;
 use function implode;
 use function in_array;
@@ -61,7 +59,6 @@ use function str_starts_with;
 use function strcasecmp;
 use function strlen;
 use function strtolower;
-use function strtoupper;
 use function substr;
 use function trim;
 use function usort;
@@ -86,6 +83,28 @@ use function usort;
  *
  * The public methods that are not part of {@see MetadataProvider} serve
  * {@see DuckDBSchemaManager} and are not a stable API.
+ *
+ * @phpstan-type PrimaryKey array{
+ *     schema: non-empty-string,
+ *     table: non-empty-string,
+ *     columns: non-empty-list<non-empty-string>,
+ * }
+ * @phpstan-type IndexRow array{
+ *     schema: non-empty-string,
+ *     table: non-empty-string,
+ *     name: non-empty-string,
+ *     unique: bool,
+ *     columns: non-empty-list<non-empty-string>,
+ * }
+ * @phpstan-type Constraint array{
+ *     schema: non-empty-string,
+ *     table: non-empty-string,
+ *     index: int,
+ *     type: string,
+ *     columns: non-empty-list<non-empty-string>,
+ *     referencedTable: non-empty-string|null,
+ *     referencedColumns: non-empty-list<non-empty-string>,
+ * }
  */
 final readonly class DuckDBMetadataProvider implements MetadataProvider
 {
@@ -599,19 +618,43 @@ final readonly class DuckDBMetadataProvider implements MetadataProvider
     }
 
     /**
-     * @return list<array{
-     *     schema: non-empty-string,
-     *     table: non-empty-string,
-     *     columns: non-empty-list<non-empty-string>,
-     * }>
+     * @return list<PrimaryKey>
      *
      * @throws Exception
      */
     public function fetchPrimaryKeys(string|null $schemaName, string|null $tableName): array
     {
+        return self::primaryKeys($this->fetchConstraints($schemaName, $tableName));
+    }
+
+    /**
+     * The primary keys and the indexes, as {@see fetchPrimaryKeys()} and
+     * {@see fetchIndexes()} return them, from one read of the constraints.
+     *
+     * @return array{list<PrimaryKey>, list<IndexRow>}
+     *
+     * @throws Exception
+     */
+    public function fetchPrimaryKeysAndIndexes(string|null $schemaName, string|null $tableName): array
+    {
+        $constraints = $this->fetchConstraints($schemaName, $tableName);
+
+        return [
+            self::primaryKeys($constraints),
+            $this->indexes($schemaName, $tableName, $constraints, null),
+        ];
+    }
+
+    /**
+     * @param list<Constraint> $constraints
+     *
+     * @return list<PrimaryKey>
+     */
+    private static function primaryKeys(array $constraints): array
+    {
         $primaryKeys = [];
 
-        foreach ($this->fetchConstraints($schemaName, $tableName) as $constraint) {
+        foreach ($constraints as $constraint) {
             if ($constraint['type'] !== 'PRIMARY KEY') {
                 continue;
             }
@@ -641,7 +684,7 @@ final readonly class DuckDBMetadataProvider implements MetadataProvider
      */
     public function fetchForeignKeys(string|null $schemaName, string|null $tableName): array
     {
-        $currentSchema = $this->fetchCurrentSchemaName();
+        $currentSchema = null;
         $foreignKeys   = [];
         $usedNames     = [];
 
@@ -649,6 +692,8 @@ final readonly class DuckDBMetadataProvider implements MetadataProvider
             if ($constraint['type'] !== 'FOREIGN KEY' || $constraint['referencedTable'] === null) {
                 continue;
             }
+
+            $currentSchema ??= $this->fetchCurrentSchemaName();
 
             $tableKey = $constraint['schema'] . '.' . $constraint['table'];
             $name     = $this->generateIdentifierName(
@@ -710,18 +755,34 @@ final readonly class DuckDBMetadataProvider implements MetadataProvider
      * constraint that no such index covers. Indexes on expressions are
      * skipped, because DBAL cannot represent them.
      *
-     * @return list<array{
-     *     schema: non-empty-string,
-     *     table: non-empty-string,
-     *     name: non-empty-string,
-     *     unique: bool,
-     *     columns: non-empty-list<non-empty-string>,
-     * }>
+     * @param non-empty-string|null $currentSchemaName The current schema, when the caller has read it already.
+     *
+     * @return list<IndexRow>
      *
      * @throws Exception
      */
-    public function fetchIndexes(string|null $schemaName, string|null $tableName): array
-    {
+    public function fetchIndexes(
+        string|null $schemaName,
+        string|null $tableName,
+        string|null $currentSchemaName = null,
+    ): array {
+        return $this->indexes($schemaName, $tableName, null, $currentSchemaName);
+    }
+
+    /**
+     * @param list<Constraint>|null $constraints   The constraints of the tables; read after the indexes when not given.
+     * @param non-empty-string|null $currentSchema
+     *
+     * @return list<IndexRow>
+     *
+     * @throws Exception
+     */
+    private function indexes(
+        string|null $schemaName,
+        string|null $tableName,
+        array|null $constraints,
+        string|null $currentSchema,
+    ): array {
         $indexes          = [];
         $uniqueColumnSets = [];
 
@@ -749,9 +810,9 @@ final readonly class DuckDBMetadataProvider implements MetadataProvider
             $indexes[] = $index;
         }
 
-        $currentSchema = null;
+        $constraints ??= $this->fetchConstraints($schemaName, $tableName);
 
-        foreach ($this->fetchConstraints($schemaName, $tableName) as $constraint) {
+        foreach ($constraints as $constraint) {
             if ($constraint['type'] !== 'UNIQUE') {
                 continue;
             }
@@ -809,11 +870,11 @@ final readonly class DuckDBMetadataProvider implements MetadataProvider
 
         $views = [];
 
-        foreach ($this->connection->iterateNumeric($sql) as [$schema, $name, $sql]) {
+        foreach ($this->connection->iterateNumeric($sql) as [$schema, $name, $definition]) {
             $views[] = [
                 'schema' => self::nonEmptyString($schema),
                 'name' => self::nonEmptyString($name),
-                'definition' => self::viewDefinition(is_string($sql) ? $sql : ''),
+                'definition' => self::viewDefinition(is_string($definition) ? $definition : ''),
             ];
         }
 
@@ -835,8 +896,6 @@ final readonly class DuckDBMetadataProvider implements MetadataProvider
      */
     public function fetchSequences(): array
     {
-        $owned = $this->fetchOwnedSequenceKeys();
-
         // DuckDB writes a sequence back with start_value set to its next counter
         // value, so after a reopen start_value drifts. The platform declares
         // MINVALUE equal to START WITH, and min_value does not drift.
@@ -854,9 +913,16 @@ final readonly class DuckDBMetadataProvider implements MetadataProvider
                      q.sequence_name
             SQL;
 
+        $rows = $this->connection->fetchAllNumeric($sql);
+
+        if ($rows === []) {
+            return [];
+        }
+
+        $owned     = $this->fetchOwnedSequenceKeys();
         $sequences = [];
 
-        foreach ($this->connection->iterateNumeric($sql) as [$schema, $name, $increment, $start]) {
+        foreach ($rows as [$schema, $name, $increment, $start]) {
             $schema = self::nonEmptyString($schema);
             $name   = self::nonEmptyString($name);
 
@@ -1047,12 +1113,7 @@ final readonly class DuckDBMetadataProvider implements MetadataProvider
      */
     public function generateIdentifierName(string $tableName, array $columnNames, string $prefix): string
     {
-        $hash = implode('', array_map(
-            static fn (string $part): string => dechex(crc32($part)),
-            [$tableName, ...$columnNames],
-        ));
-
-        return self::nonEmptyString(strtoupper(substr($prefix . '_' . $hash, 0, $this->platform->getMaxIdentifierLength())));
+        return $this->platform->generateIdentifierName($tableName, $columnNames, $prefix);
     }
 
     /**
@@ -1147,15 +1208,7 @@ final readonly class DuckDBMetadataProvider implements MetadataProvider
     }
 
     /**
-     * @return list<array{
-     *     schema: non-empty-string,
-     *     table: non-empty-string,
-     *     index: int,
-     *     type: string,
-     *     columns: non-empty-list<non-empty-string>,
-     *     referencedTable: non-empty-string|null,
-     *     referencedColumns: non-empty-list<non-empty-string>,
-     * }>
+     * @return list<Constraint>
      *
      * @throws Exception
      */

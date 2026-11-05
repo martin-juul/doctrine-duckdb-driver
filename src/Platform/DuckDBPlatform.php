@@ -13,7 +13,6 @@ use Doctrine\DBAL\Platforms\Exception\NotSupported;
 use Doctrine\DBAL\Platforms\Keywords\KeywordList;
 use Doctrine\DBAL\Query\SelectQuery;
 use Doctrine\DBAL\Schema\Column;
-use Doctrine\DBAL\Schema\DefaultExpression;
 use Doctrine\DBAL\Schema\ForeignKeyConstraint;
 use Doctrine\DBAL\Schema\ForeignKeyConstraint\ReferentialAction;
 use Doctrine\DBAL\Schema\Index;
@@ -34,6 +33,7 @@ use Doctrine\DBAL\TransactionIsolationLevel;
 use Doctrine\DBAL\Types\Types;
 use MartinJuul\DBAL\DuckDB\Schema\DuckDBMetadataProvider;
 use MartinJuul\DBAL\DuckDB\Schema\DuckDBSchemaManager;
+use MartinJuul\DBAL\DuckDB\Schema\RawDefaultExpression;
 use MartinJuul\DBAL\DuckDB\Schema\RebuildPlan;
 use MartinJuul\DBAL\DuckDB\Schema\TableRebuilder;
 use MartinJuul\DBAL\DuckDB\Types\HugeIntType;
@@ -57,7 +57,6 @@ use function explode;
 use function implode;
 use function is_string;
 use function preg_match;
-use function sort;
 use function sprintf;
 use function str_contains;
 use function str_ends_with;
@@ -420,7 +419,7 @@ class DuckDBPlatform extends AbstractPlatform
         $sql         = [];
 
         foreach ($tables as $table) {
-            $key        = self::tableKey($table->getObjectName());
+            $key        = RebuildPlan::tableKey($table->getObjectName());
             $primaryKey = $table->getPrimaryKeyConstraint();
 
             $this->keyColumnOrders[$key] = $referenced[$key] ?? [];
@@ -431,12 +430,12 @@ class DuckDBPlatform extends AbstractPlatform
 
             $columns = $primaryKey->getColumnNames();
 
-            $this->keyColumnOrders[$key][self::columnSetKey($columns)] = $columns;
+            $this->keyColumnOrders[$key][RebuildPlan::columnSetKey($columns)] = $columns;
         }
 
         try {
             foreach ($tables as $table) {
-                $key = self::tableKey($table->getObjectName());
+                $key = RebuildPlan::tableKey($table->getObjectName());
 
                 $identities = [];
 
@@ -595,7 +594,7 @@ class DuckDBPlatform extends AbstractPlatform
                 continue;
             }
 
-            $column['default'] = self::rawDefault($this->ownedSequenceDefaults[$position]);
+            $column['default'] = new RawDefaultExpression($this->ownedSequenceDefaults[$position]);
 
             $columns[$position] = $column;
         }
@@ -621,7 +620,7 @@ class DuckDBPlatform extends AbstractPlatform
         }
 
         foreach ($uniqueConstraints as $constraint) {
-            $columnSet = self::columnSetKey($constraint->getColumnNames());
+            $columnSet = RebuildPlan::columnSetKey($constraint->getColumnNames());
 
             if (! isset($this->referencedColumnLists[$columnSet])) {
                 continue;
@@ -671,7 +670,7 @@ class DuckDBPlatform extends AbstractPlatform
         }
 
         foreach ($uniqueConstraints as $constraint) {
-            if (isset($inlineUnique[self::columnSetKey($constraint->getColumnNames())])) {
+            if (isset($inlineUnique[RebuildPlan::columnSetKey($constraint->getColumnNames())])) {
                 continue;
             }
 
@@ -994,19 +993,24 @@ class DuckDBPlatform extends AbstractPlatform
         return null;
     }
 
-    /** A default expression that renders the given SQL as written. */
-    private static function rawDefault(string $sql): DefaultExpression
+    /**
+     * Generates a name the way DBAL's Table names an unnamed index or foreign
+     * key, from the table name and the column names.
+     *
+     * @internal
+     *
+     * @param list<string> $columnNames
+     *
+     * @return non-empty-string
+     */
+    public function generateIdentifierName(string $tableName, array $columnNames, string $prefix): string
     {
-        return new class ($sql) implements DefaultExpression {
-            public function __construct(private readonly string $sql)
-            {
-            }
+        $hash = implode('', array_map(
+            static fn (string $part): string => dechex(crc32($part)),
+            [$tableName, ...$columnNames],
+        ));
 
-            public function toSQL(AbstractPlatform $platform): string
-            {
-                return $this->sql;
-            }
-        };
+        return strtoupper(substr($prefix . '_' . $hash, 0, $this->getMaxIdentifierLength()));
     }
 
     /**
@@ -1069,7 +1073,7 @@ class DuckDBPlatform extends AbstractPlatform
         $foreignKeys = [];
 
         foreach ($tables as $table) {
-            $key = self::tableKey($table->getObjectName());
+            $key = RebuildPlan::tableKey($table->getObjectName());
 
             $foreignKeys[$key] = [];
 
@@ -1096,8 +1100,9 @@ class DuckDBPlatform extends AbstractPlatform
     private function inKeyColumnOrder(ForeignKeyConstraint $foreignKey): ForeignKeyConstraint
     {
         $referencedColumns = $foreignKey->getReferencedColumnNames();
-        $referencedTable   = self::tableKey($foreignKey->getReferencedTableName());
-        $order             = $this->keyColumnOrders[$referencedTable][self::columnSetKey($referencedColumns)] ?? null;
+        $referencedTable   = RebuildPlan::tableKey($foreignKey->getReferencedTableName());
+        $columnSet         = RebuildPlan::columnSetKey($referencedColumns);
+        $order             = $this->keyColumnOrders[$referencedTable][$columnSet] ?? null;
 
         if ($order === null) {
             return $foreignKey;
@@ -1126,16 +1131,7 @@ class DuckDBPlatform extends AbstractPlatform
             return $foreignKey;
         }
 
-        return $foreignKey->edit()
-            ->setReferencingColumnNames(...array_map(
-                static fn (int $position): UnqualifiedName => $referencingColumns[$position],
-                $newPositions,
-            ))
-            ->setReferencedColumnNames(...array_map(
-                static fn (int $position): UnqualifiedName => $referencedColumns[$position],
-                $newPositions,
-            ))
-            ->create();
+        return RebuildPlan::reorderForeignKey($foreignKey, $newPositions);
     }
 
     /**
@@ -1150,52 +1146,12 @@ class DuckDBPlatform extends AbstractPlatform
      */
     private static function sortParentsFirst(array $tables, array $foreignKeys): array
     {
-        $byKey = [];
+        $byKey = RebuildPlan::byKey($tables);
 
-        foreach ($tables as $table) {
-            $byKey[self::tableKey($table->getObjectName())] = $table;
-        }
-
-        $visited = [];
-        $sorted  = [];
-
-        foreach (array_keys($byKey) as $key) {
-            self::visit($key, $byKey, $foreignKeys, $visited, $sorted);
-        }
-
-        return $sorted;
-    }
-
-    /**
-     * @param array<string, Table>                      $byKey
-     * @param array<string, list<ForeignKeyConstraint>> $foreignKeys
-     * @param array<string, true>                       $visited
-     * @param list<Table>                               $sorted
-     */
-    private static function visit(
-        string $key,
-        array $byKey,
-        array $foreignKeys,
-        array &$visited,
-        array &$sorted,
-    ): void {
-        if (isset($visited[$key])) {
-            return;
-        }
-
-        $visited[$key] = true;
-
-        foreach ($foreignKeys[$key] ?? [] as $foreignKey) {
-            $referenced = self::tableKey($foreignKey->getReferencedTableName());
-
-            if ($referenced === $key || ! isset($byKey[$referenced])) {
-                continue;
-            }
-
-            self::visit($referenced, $byKey, $foreignKeys, $visited, $sorted);
-        }
-
-        $sorted[] = $byKey[$key];
+        return array_map(
+            static fn (string $key): Table => $byKey[$key],
+            RebuildPlan::parentsFirst($byKey, $foreignKeys),
+        );
     }
 
     /**
@@ -1218,16 +1174,18 @@ class DuckDBPlatform extends AbstractPlatform
                 continue;
             }
 
-            $primaryKeys[self::tableKey($table->getObjectName())] = self::columnSetKey($primaryKey->getColumnNames());
+            $key = RebuildPlan::tableKey($table->getObjectName());
+
+            $primaryKeys[$key] = RebuildPlan::columnSetKey($primaryKey->getColumnNames());
         }
 
         $lists = [];
 
         foreach ($foreignKeys as $tableForeignKeys) {
             foreach ($tableForeignKeys as $foreignKey) {
-                $referencedTable = self::tableKey($foreignKey->getReferencedTableName());
+                $referencedTable = RebuildPlan::tableKey($foreignKey->getReferencedTableName());
                 $columns         = $foreignKey->getReferencedColumnNames();
-                $columnSet       = self::columnSetKey($columns);
+                $columnSet       = RebuildPlan::columnSetKey($columns);
 
                 if (($primaryKeys[$referencedTable] ?? null) === $columnSet) {
                     continue;
@@ -1240,32 +1198,6 @@ class DuckDBPlatform extends AbstractPlatform
         return $lists;
     }
 
-    /** DuckDB matches identifiers case-insensitively, quoted or not. */
-    private static function tableKey(OptionallyQualifiedName $name): string
-    {
-        $key       = strtolower($name->getUnqualifiedName()->getValue());
-        $qualifier = $name->getQualifier();
-
-        if ($qualifier === null) {
-            return $key;
-        }
-
-        return strtolower($qualifier->getValue()) . '.' . $key;
-    }
-
-    /** @param list<UnqualifiedName> $columns */
-    private static function columnSetKey(array $columns): string
-    {
-        $names = array_map(
-            static fn (UnqualifiedName $column): string => strtolower($column->getIdentifier()->getValue()),
-            $columns,
-        );
-
-        sort($names);
-
-        return implode("\0", $names);
-    }
-
     /** The column set of a unique index without predicate, or null for any other index. */
     private static function uniqueIndexColumnSet(Index $index): string|null
     {
@@ -1273,7 +1205,7 @@ class DuckDBPlatform extends AbstractPlatform
             return null;
         }
 
-        return self::columnSetKey(array_map(
+        return RebuildPlan::columnSetKey(array_map(
             static fn (IndexedColumn $column): UnqualifiedName => $column->getColumnName(),
             $index->getIndexedColumns(),
         ));
@@ -1295,14 +1227,12 @@ class DuckDBPlatform extends AbstractPlatform
         $name    = $constraint->getObjectName();
 
         if ($name === null) {
-            $parts = [$table];
+            $columnNames = array_map(
+                static fn (UnqualifiedName $column): string => $column->getIdentifier()->getValue(),
+                $columns,
+            );
 
-            foreach ($columns as $column) {
-                $parts[] = $column->getIdentifier()->getValue();
-            }
-
-            $hash = implode('', array_map(static fn (string $part): string => dechex(crc32($part)), $parts));
-            $name = UnqualifiedName::unquoted(strtoupper(substr('uniq_' . $hash, 0, $this->getMaxIdentifierLength())));
+            $name = UnqualifiedName::unquoted($this->generateIdentifierName($table, $columnNames, 'uniq'));
         }
 
         return Index::editor()

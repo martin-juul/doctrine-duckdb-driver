@@ -195,7 +195,7 @@ final class TableRebuilder
         }
 
         return $this->bracket(
-            array_merge($steps, $this->tableSteps($plan->rebuilds, [], [], [], [])),
+            array_merge($steps, $this->tableSteps($plan->rebuilds)),
             $plan->rebuilds,
         );
     }
@@ -209,7 +209,7 @@ final class TableRebuilder
      */
     public function rebuildSteps(array $rebuilds): array
     {
-        return $this->bracket($this->tableSteps($rebuilds, [], [], [], []), $rebuilds);
+        return $this->bracket($this->tableSteps($rebuilds), $rebuilds);
     }
 
     /**
@@ -340,10 +340,10 @@ final class TableRebuilder
      */
     private function tableSteps(
         array $rebuilds,
-        array $created,
-        array $dropped,
-        array $omittedForeignKeys,
-        array $omittedOldForeignKeys,
+        array $created = [],
+        array $dropped = [],
+        array $omittedForeignKeys = [],
+        array $omittedOldForeignKeys = [],
     ): array {
         $rebuilds = array_map($this->withDeclaredColumnNames(...), $rebuilds);
         $steps    = [];
@@ -390,17 +390,13 @@ final class TableRebuilder
             ));
         }
 
-        $toDrop = [];
-
-        foreach ($dropped as $table) {
-            $toDrop[RebuildPlan::tableKey($table->getObjectName())] = $table;
-        }
+        $toDrop = RebuildPlan::byKey($dropped);
 
         foreach ($rebuilds as $key => $rebuild) {
             $toDrop[$key] = $rebuild['old'];
         }
 
-        $dropOrder = self::parentsFirst($toDrop, $this->platform->createdForeignKeys($toDrop, $omittedOldForeignKeys));
+        $dropOrder = RebuildPlan::parentsFirst($toDrop, $this->platform->createdForeignKeys($toDrop, $omittedOldForeignKeys));
 
         foreach (array_reverse($dropOrder) as $key) {
             if (isset($rebuilds[$key])) {
@@ -873,54 +869,6 @@ final class TableRebuilder
     private function name(Column $column): string
     {
         return $column->getObjectName()->toSQL($this->platform);
-    }
-
-    /**
-     * Orders tables so that every table follows the tables it references;
-     * self-references and references to tables outside the set are ignored.
-     *
-     * @param array<string, Table>                      $tables
-     * @param array<string, list<ForeignKeyConstraint>> $foreignKeys The foreign keys to follow, per table.
-     *
-     * @return list<string>
-     */
-    private static function parentsFirst(array $tables, array $foreignKeys): array
-    {
-        $sorted  = [];
-        $visited = [];
-
-        foreach (array_keys($tables) as $key) {
-            self::visit($key, $tables, $foreignKeys, $visited, $sorted);
-        }
-
-        return $sorted;
-    }
-
-    /**
-     * @param array<string, Table>                      $tables
-     * @param array<string, list<ForeignKeyConstraint>> $foreignKeys
-     * @param array<string, true>                       $visited
-     * @param list<string>                              $sorted
-     */
-    private static function visit(string $key, array $tables, array $foreignKeys, array &$visited, array &$sorted): void
-    {
-        if (isset($visited[$key])) {
-            return;
-        }
-
-        $visited[$key] = true;
-
-        foreach ($foreignKeys[$key] ?? [] as $foreignKey) {
-            $parent = RebuildPlan::tableKey($foreignKey->getReferencedTableName());
-
-            if ($parent === $key || ! isset($tables[$parent])) {
-                continue;
-            }
-
-            self::visit($parent, $tables, $foreignKeys, $visited, $sorted);
-        }
-
-        $sorted[] = $key;
     }
 
     /**
