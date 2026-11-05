@@ -19,7 +19,8 @@
     "require": {
         "php": "^8.4",
         "ext-duckdb": "^2.0",
-        "doctrine/dbal": "^4.5"
+        "doctrine/dbal": "^4.5",
+        "psr/log": "^1 || ^2 || ^3"
     },
     "require-dev": {
         "doctrine/coding-standard": "^14.0",

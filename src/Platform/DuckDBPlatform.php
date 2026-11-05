@@ -43,6 +43,8 @@ use MartinJuul\DBAL\DuckDB\Types\MapType;
 use MartinJuul\DBAL\DuckDB\Types\NativeType;
 use MartinJuul\DBAL\DuckDB\Types\StructType;
 use MartinJuul\DBAL\DuckDB\Types\TypeRegistrar;
+use Psr\Log\LoggerInterface;
+use Psr\Log\NullLogger;
 use WeakMap;
 
 use function array_keys;
@@ -113,7 +115,12 @@ class DuckDBPlatform extends AbstractPlatform
      */
     public const string COLLATION_OPTION = 'duckdb_collation';
 
+    /** The type declarations that DuckDB stores as VARCHAR, the only type with a collation. */
+    private const string COLLATABLE_TYPE = '/^(?:VARCHAR|TEXT|STRING|CHAR|BPCHAR|NVARCHAR)(?:\s*\(\s*\d+\s*\))?$/i';
+
     private bool $omitForeignKeys = false;
+
+    private LoggerInterface $logger;
 
     /**
      * While a table's CREATE statement is built: the column lists that foreign
@@ -166,6 +173,8 @@ class DuckDBPlatform extends AbstractPlatform
     public function __construct()
     {
         parent::__construct(UnquotedIdentifierFolding::NONE);
+
+        $this->logger = new NullLogger();
     }
 
     /**
@@ -184,6 +193,60 @@ class DuckDBPlatform extends AbstractPlatform
     public function omitsForeignKeys(): bool
     {
         return $this->omitForeignKeys;
+    }
+
+    /**
+     * Returns a copy of this platform that logs schema changes which lose
+     * something DuckDB cannot carry over, such as a collation, as notices.
+     */
+    public function withLogger(LoggerInterface $logger): static
+    {
+        $platform = clone $this;
+
+        $platform->logger = $logger;
+
+        return $platform;
+    }
+
+    /**
+     * Logs that a schema change drops a column's collation because the
+     * column's new type has none.
+     *
+     * @internal
+     */
+    public function noticeDroppedCollation(
+        OptionallyQualifiedName $table,
+        Column $column,
+        string $collation,
+        string $type,
+    ): void {
+        $qualifier = $table->getQualifier();
+        $tableName = $table->getUnqualifiedName()->getValue();
+
+        if ($qualifier !== null) {
+            $tableName = $qualifier->getValue() . '.' . $tableName;
+        }
+
+        $this->logger->notice(
+            'DuckDB drops the collation {collation} of column {table}.{column}: its new type {type} has no '
+                . 'collation; only VARCHAR columns have one.',
+            [
+                'table' => $tableName,
+                'column' => $column->getObjectName()->getIdentifier()->getValue(),
+                'collation' => $collation,
+                'type' => $type,
+            ],
+        );
+    }
+
+    /**
+     * Whether a column of the type declaration can have a collation.
+     *
+     * @internal
+     */
+    public static function isCollatableType(string $declaration): bool
+    {
+        return preg_match(self::COLLATABLE_TYPE, $declaration) === 1;
     }
 
     /**

@@ -12,7 +12,6 @@ use Doctrine\DBAL\Schema\ColumnEditor;
 use Doctrine\DBAL\Schema\Schema;
 use Doctrine\DBAL\Schema\SchemaDiff;
 use Doctrine\DBAL\Schema\Table;
-use Doctrine\DBAL\Types\Types;
 use MartinJuul\DBAL\DuckDB\Driver\StatementClassifier;
 use MartinJuul\DBAL\DuckDB\Platform\DuckDBPlatform;
 use MartinJuul\DBAL\DuckDB\Schema\DuckDBComparator;
@@ -26,7 +25,8 @@ use function is_string;
  * A rebuild keeps the CHECK constraints that DBAL cannot represent and the
  * column collations, which introspection does not report, on the tables it
  * changes and on the tables it pulls in because they reference one, or
- * refuses the change.
+ * refuses the change. {@see CollationTypeChangeTest} covers a collated column
+ * that gets a type without collation.
  */
 final class CheckAndCollationRebuildTest extends FunctionalTestCase
 {
@@ -202,33 +202,6 @@ final class CheckAndCollationRebuildTest extends FunctionalTestCase
             self::assertStringContainsString(
                 'Cannot rebuild table p: its CHECK constraint p_lo_hi_check, CHECK ((lo < hi)), uses column hi, '
                     . 'which this change drops',
-                $e->getMessage(),
-            );
-        }
-
-        self::assertSame($before, $this->snapshot());
-    }
-
-    public function testChangingTheTypeOfACollatedColumnToANonStringTypeIsRefused(): void
-    {
-        $before = $this->snapshot();
-
-        try {
-            $this->schemaManager()->alterSchema($this->diff(
-                static fn (Table $p): Table => $p,
-                static fn (Table $c): Table => $c->edit()
-                    ->modifyColumnByUnquotedName('tag', static function (ColumnEditor $column): void {
-                        $column->setTypeName(Types::INTEGER);
-                    })
-                    ->renameColumnByUnquotedName('p_id', 'parent_id')
-                    ->create(),
-            ));
-
-            self::fail('The rebuild succeeded.');
-        } catch (NotSupported $e) {
-            self::assertStringContainsString(
-                'Cannot rebuild table c: its column tag has the collation NOCASE, which the column\'s new type '
-                    . 'INTEGER cannot keep',
                 $e->getMessage(),
             );
         }

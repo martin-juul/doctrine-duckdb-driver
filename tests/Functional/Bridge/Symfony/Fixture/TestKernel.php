@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace MartinJuul\DBAL\DuckDB\Tests\Functional\Bridge\Symfony\Fixture;
 
+use Closure;
 use Doctrine\Bundle\DoctrineBundle\DoctrineBundle;
 use MartinJuul\DBAL\DuckDB\Bridge\Symfony\DuckDBBundle;
 use Symfony\Bundle\FrameworkBundle\FrameworkBundle;
@@ -22,10 +23,14 @@ use function random_bytes;
  */
 final class TestKernel extends Kernel
 {
-    /** @param array<string, array<string, mixed>> $extensionConfigs configuration keyed by extension alias */
+    /**
+     * @param array<string, array<string, mixed>>    $extensionConfigs   configuration keyed by extension alias
+     * @param (Closure(ContainerBuilder): void)|null $configureContainer registers or replaces services
+     */
     public function __construct(
         private readonly string $directory,
         private readonly array $extensionConfigs,
+        private readonly Closure|null $configureContainer = null,
     ) {
         parent::__construct('test' . bin2hex(random_bytes(4)), false);
     }
@@ -49,6 +54,12 @@ final class TestKernel extends Kernel
             foreach ($this->extensionConfigs as $extension => $config) {
                 $container->loadFromExtension($extension, $config);
             }
+
+            if ($this->configureContainer === null) {
+                return;
+            }
+
+            ($this->configureContainer)($container);
         });
     }
 

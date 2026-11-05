@@ -226,12 +226,12 @@ DBAL represents only the `CHECK` constraints that declare a column's minimum or 
 
 - **Renamed columns:** a `CHECK` constraint that uses a renamed column is rewritten to use the new name. A collation moves with its column.
 - **Dropped columns:** a `CHECK` constraint whose columns the change all drops is dropped with them, as DuckDB's `ALTER TABLE … DROP COLUMN` does.
+- **A collated column gets a type without collations:** only `VARCHAR` columns have collations, so the column loses its collation, as it does with DuckDB's own `ALTER TABLE … ALTER COLUMN … TYPE`. This applies whether the change runs as a native `ALTER` or as a rebuild. The driver logs a [schema notice](setup.md#schema-notices) naming the table, column, collation and new type. Only a change planned with a connection can see the collation: `AbstractPlatform::getAlterTableSQL()` without one emits the native `ALTER … TYPE`, which drops the collation without a notice.
 
 The rebuild fails with `NotSupported`, before anything runs, when it cannot keep one of them:
 
 - **A `CHECK` constraint uses a dropped column and a kept one:** "Cannot rebuild table …: its CHECK constraint …, CHECK (…), uses column …, which this change drops, together with columns it keeps." DuckDB refuses to drop such a column too.
 - **A rename cannot be applied reliably:** "… uses a column that this change renames, and the new name cannot be applied to the expression reliably." This happens when the expression also uses a struct field of the column's name, such as `s.status`.
-- **A collated column gets a type without collations:** "Cannot rebuild table …: its column … has the collation …, which the column's new type … cannot keep." Only `VARCHAR` columns have collations.
 
 Workaround: change these tables with hand-written SQL. DuckDB cannot add or drop a `CHECK` constraint on an existing table, so the SQL recreates the table.
 

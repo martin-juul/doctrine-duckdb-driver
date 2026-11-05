@@ -75,11 +75,13 @@ use const PREG_UNMATCHED_AS_NULL;
  * that the rebuild entries carry from DuckDB's catalog. A CHECK constraint on
  * a renamed column is rewritten to the new name; one whose columns are all
  * dropped goes with them, as DuckDB's DROP COLUMN does. A CHECK constraint
- * that uses a dropped column together with a kept one, a rename the rewrite
- * cannot apply reliably, and a collated column whose new type cannot keep its
- * collation are refused. A rebuild entry that was built without reading the
- * catalog begins with a check that fails while its table has a generated
- * column, a CHECK constraint or a collation that the rebuild would lose.
+ * that uses a dropped column together with a kept one and a rename the
+ * rewrite cannot apply reliably are refused. A collated column whose new type
+ * has no collation loses it, as DuckDB's ALTER COLUMN TYPE does, and the
+ * platform's logger records a notice. A rebuild entry that was built without
+ * reading the catalog begins with a check that fails while its table has a
+ * generated column, a CHECK constraint or a collation that the rebuild would
+ * lose.
  *
  * An autoincrement column whose values come from a column that was not one
  * gets a new owned sequence, which the rebuild moves past the copied values
@@ -117,9 +119,6 @@ final class TableRebuilder
      * that is not followed by a parenthesis (group 2).
      */
     private const string TOKENS = '/\'(?:[^\']|\'\')*\'|"((?:[^"]|"")+)"|(?<![A-Za-z0-9_$])([A-Za-z_][A-Za-z0-9_$]*+)(?!\s*\()/';
-
-    /** The type declarations that DuckDB stores as VARCHAR, the only type with a collation. */
-    private const string STRING_TYPE = '/^(?:VARCHAR|TEXT|STRING|CHAR|BPCHAR|NVARCHAR)(?:\s*\(\s*\d+\s*\))?$/i';
 
     /** The keys of a column's properties in {@see Column::toArray()}; any other key is a platform option. */
     private const array COLUMN_PROPERTIES = [
@@ -159,6 +158,7 @@ final class TableRebuilder
         if ($plan === null) {
             $plan = $this->withCatalogDetails(
                 (new AlterRouting($this->platform))->plan($diff->getAlteredTables()),
+                $diff->getAlteredTables(),
                 $connection,
             );
         }
@@ -218,7 +218,7 @@ final class TableRebuilder
      */
     public function tableDiffSteps(TableDiff $diff, Connection|null $connection = null): array
     {
-        $plan  = $this->withCatalogDetails((new AlterRouting($this->platform))->plan([$diff]), $connection);
+        $plan  = $this->withCatalogDetails((new AlterRouting($this->platform))->plan([$diff]), [$diff], $connection);
         $steps = [];
 
         foreach ($plan->nativeSQL as $statements) {
@@ -332,14 +332,34 @@ final class TableRebuilder
 
     /**
      * The plan with each rebuild carrying what DBAL cannot represent of its
-     * table, after refusing tables with generated columns, as the comparator
-     * does.
+     * table, after refusing tables with generated columns and logging the
+     * collations that native statements drop, as the comparator does.
+     *
+     * @param array<TableDiff> $diffs The diffs the plan routes.
      *
      * @throws Exception
      */
-    private function withCatalogDetails(RebuildPlan $plan, Connection|null $connection): RebuildPlan
+    private function withCatalogDetails(RebuildPlan $plan, array $diffs, Connection|null $connection): RebuildPlan
     {
-        if ($connection === null || count($plan->rebuilds) === 0) {
+        if ($connection === null) {
+            return $plan;
+        }
+
+        $native = [];
+
+        foreach ($diffs as $diff) {
+            $key = RebuildPlan::tableKey($diff->getOldTable()->getObjectName());
+
+            if (! isset($plan->nativeSQL[$key])) {
+                continue;
+            }
+
+            $native[$key] = $diff;
+        }
+
+        DuckDBComparator::noticeDroppedCollations($connection, $this->platform, $native);
+
+        if (count($plan->rebuilds) === 0) {
             return $plan;
         }
 
@@ -858,11 +878,11 @@ final class TableRebuilder
 
     /**
      * The new table with each column whose values come from a collated column
-     * declaring that collation.
+     * declaring that collation, when its new type has one.
      *
      * @param Rebuild $rebuild
      *
-     * @throws NotSupported When the new type of a collated column cannot keep its collation.
+     * @throws NotSupported When the collation of a column cannot be declared.
      */
     private function withCollations(array $rebuild, Table $table): Table
     {
@@ -898,9 +918,11 @@ final class TableRebuilder
     }
 
     /**
-     * The column declaring the collation.
+     * The column declaring the collation, or, when its new type has no
+     * collation, the column as it is, with a notice that the collation is
+     * dropped.
      *
-     * @throws NotSupported When the column's type cannot keep the collation, or its own definition leaves it out.
+     * @throws NotSupported When the collation cannot be declared, or the column's own definition leaves it out.
      */
     private function collated(Table $old, Column $column, string $collation): Column
     {
@@ -923,14 +945,19 @@ final class TableRebuilder
 
         $type = Type::getType($column->getTypeName())->getSQLDeclaration($column->toArray(true), $this->platform);
 
-        if (preg_match('/^[A-Za-z0-9_.]+$/', $collation) !== 1 || preg_match(self::STRING_TYPE, $type) !== 1) {
+        if (! DuckDBPlatform::isCollatableType($type)) {
+            $this->platform->noticeDroppedCollation($old->getObjectName(), $column, $collation, $type);
+
+            return $column;
+        }
+
+        if (preg_match('/^[A-Za-z0-9_.]+$/', $collation) !== 1) {
             throw new NotSupported(sprintf(
-                'Cannot rebuild table %s: its column %s has the collation %s, which the column\'s new type %s '
-                    . 'cannot keep. Change the column with hand-written SQL.',
+                'Cannot rebuild table %s: its column %s has the collation %s, which the rebuild cannot declare. '
+                    . 'Change the column with hand-written SQL.',
                 $old->getObjectName()->toString(),
                 $column->getObjectName()->toString(),
                 $collation,
-                $type,
             ));
         }
 

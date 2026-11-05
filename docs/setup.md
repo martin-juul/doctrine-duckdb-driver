@@ -89,6 +89,7 @@ $connection = DriverManager::getConnection($params);
 | `configureOrm(Configuration $config)` | Calls `registerTypes()`, then adds an identity-generation preference that makes ORM's `AUTO` strategy use sequences on DuckDB. Preferences already set for other platforms are kept. |
 | `registerListeners(EventManager $eventManager)` | Adds the package's ORM listener, which deletes the subclass-table rows of removed JOINED-inheritance entities on DuckDB connections. |
 | `omitForeignKeys(Configuration $config)` | Appends a DBAL middleware that leaves foreign-key constraints out of generated DDL for DuckDB connections. |
+| `logSchemaNotices(Configuration $config, LoggerInterface $logger)` | Appends a DBAL middleware that logs, as PSR-3 notices, schema changes that lose something DuckDB cannot carry over. See [Schema notices](#schema-notices). |
 
 ### Why ORM needs `configureOrm()`
 
@@ -147,6 +148,24 @@ $connection = DriverManager::getConnection($params, $config);
 
 Call it before creating the connection. Generated DDL then contains no foreign keys, schema comparison ignores them, and introspection reports none. ORM associations keep working; referential integrity becomes the application's job.
 
+### Schema notices
+
+Some schema changes succeed but lose something DuckDB cannot carry over. Today that is a column's collation, such as `COLLATE NOCASE`, when the column gets a type without collations (see [limitations](limitations.md#check-constraints-and-collations-in-a-rebuild)). The driver logs each such change at the PSR-3 `notice` level:
+
+```text
+DuckDB drops the collation NOCASE of column t.code: its new type INTEGER has no collation; only VARCHAR columns have one.
+```
+
+The context carries `table`, `column`, `collation` and `type`. Pass a PSR-3 logger to receive the notices; without one they are discarded:
+
+```php
+DuckDBSetup::logSchemaNotices($config, $logger);
+
+$connection = DriverManager::getConnection($params, $config);
+```
+
+The notice is logged when the change is planned: when the schema manager compares schemas or alters a table, and when a table rebuild's SQL is generated. A migration generated with `doctrine:migrations:diff` therefore logs it during `diff`, not when the migration runs.
+
 ## Symfony
 
 `MartinJuul\DBAL\DuckDB\Bridge\Symfony\DuckDBBundle` configures DoctrineBundle for DuckDB:
@@ -154,6 +173,7 @@ Call it before creating the connection. Generated DDL then contains no foreign k
 - it registers the custom types and the `duckdb` URL scheme;
 - it adds the sequence preference to every entity manager, keeping preferences configured there;
 - it registers the listener that deletes the subclass-table rows of removed JOINED-inheritance entities on every connection's event manager, so every entity manager uses it;
+- it logs [schema notices](#schema-notices) of every DuckDB connection to the `logger` service, in the `doctrine` channel when MonologBundle is installed;
 - it omits foreign keys on the connections you list under `duckdb.omit_foreign_keys`.
 
 Connections to other databases are left unchanged. The bundle also works in applications that use DBAL without the ORM.

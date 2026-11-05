@@ -9,7 +9,10 @@ use Doctrine\DBAL\DriverManager;
 use Doctrine\DBAL\Exception\DriverException;
 use Doctrine\DBAL\Logging\Middleware as LoggingMiddleware;
 use Doctrine\DBAL\Platforms\PostgreSQLPlatform;
+use Doctrine\DBAL\Schema\ColumnEditor;
+use Doctrine\DBAL\Schema\Schema;
 use Doctrine\DBAL\Types\Type;
+use Doctrine\DBAL\Types\Types;
 use Doctrine\ORM\Configuration as ORMConfiguration;
 use Doctrine\ORM\EntityManager;
 use Doctrine\ORM\Mapping\ClassMetadata;
@@ -17,10 +20,12 @@ use Doctrine\ORM\ORMSetup;
 use Doctrine\ORM\Tools\SchemaTool;
 use MartinJuul\DBAL\DuckDB\Driver;
 use MartinJuul\DBAL\DuckDB\Driver\Exception\IdentityColumnsNotSupported;
+use MartinJuul\DBAL\DuckDB\Driver\Middleware\LogSchemaNotices;
 use MartinJuul\DBAL\DuckDB\Driver\Middleware\OmitForeignKeys;
 use MartinJuul\DBAL\DuckDB\Platform\DuckDBPlatform;
 use MartinJuul\DBAL\DuckDB\Setup\DuckDBSetup;
 use MartinJuul\DBAL\DuckDB\Tests\Functional\Bridge\Symfony\Fixture\Entity\Note;
+use MartinJuul\DBAL\DuckDB\Tests\Functional\Fixtures\RecordingLogger;
 use MartinJuul\DBAL\DuckDB\Tests\Functional\FunctionalTestCase;
 use MartinJuul\DBAL\DuckDB\Types\TypeRegistrar;
 use PHPUnit\Framework\Attributes\After;
@@ -137,6 +142,37 @@ final class DuckDBSetupTest extends FunctionalTestCase
 
         self::assertInstanceOf(DuckDBPlatform::class, $platform);
         self::assertTrue($platform->omitsForeignKeys());
+    }
+
+    public function testLogSchemaNoticesAppendsTheMiddleware(): void
+    {
+        $logging       = new LoggingMiddleware(new NullLogger());
+        $logger        = new RecordingLogger();
+        $configuration = new DBALConfiguration();
+        $configuration->setMiddlewares([$logging]);
+
+        DuckDBSetup::logSchemaNotices($configuration, $logger);
+
+        $middlewares = $configuration->getMiddlewares();
+
+        self::assertSame([0, 1], array_keys($middlewares));
+        self::assertSame($logging, $middlewares[0]);
+        self::assertInstanceOf(LogSchemaNotices::class, $middlewares[1]);
+
+        $connection = DriverManager::getConnection(['driverClass' => Driver::class, 'memory' => true], $configuration);
+        $connection->executeStatement('CREATE TABLE t (id INTEGER PRIMARY KEY, code VARCHAR COLLATE NOCASE)');
+
+        $schemaManager = $connection->createSchemaManager();
+        $current       = $schemaManager->introspectSchema();
+        $table         = $current->getTable('t')->edit()
+            ->modifyColumnByUnquotedName('code', static function (ColumnEditor $column): void {
+                $column->setTypeName(Types::INTEGER);
+            })
+            ->create();
+
+        $schemaManager->alterSchema($schemaManager->createComparator()->compareSchemas($current, new Schema([$table])));
+
+        self::assertCount(1, $logger->records);
     }
 
     /** Documents why the setup is needed: ORM resolves AUTO to IDENTITY, and DuckDB has no identity columns. */

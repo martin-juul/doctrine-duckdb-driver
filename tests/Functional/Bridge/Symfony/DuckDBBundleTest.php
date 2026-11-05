@@ -4,9 +4,13 @@ declare(strict_types=1);
 
 namespace MartinJuul\DBAL\DuckDB\Tests\Functional\Bridge\Symfony;
 
+use Closure;
 use Doctrine\DBAL\Connection;
 use Doctrine\DBAL\Platforms\PostgreSQLPlatform;
 use Doctrine\DBAL\Platforms\SQLitePlatform;
+use Doctrine\DBAL\Schema\ColumnEditor;
+use Doctrine\DBAL\Schema\Schema;
+use Doctrine\DBAL\Types\Types;
 use Doctrine\ORM\EntityManagerInterface;
 use Doctrine\ORM\Mapping\ClassMetadata;
 use Doctrine\ORM\Tools\SchemaTool;
@@ -14,15 +18,18 @@ use Doctrine\Persistence\ManagerRegistry;
 use MartinJuul\DBAL\DuckDB\Platform\DuckDBPlatform;
 use MartinJuul\DBAL\DuckDB\Tests\Functional\Bridge\Symfony\Fixture\Entity\Note;
 use MartinJuul\DBAL\DuckDB\Tests\Functional\Bridge\Symfony\Fixture\TestKernel;
+use MartinJuul\DBAL\DuckDB\Tests\Functional\Fixtures\RecordingLogger;
 use MartinJuul\DBAL\DuckDB\Tests\Functional\Orm\ReferentialActionFixture\SportsCar;
 use MartinJuul\DBAL\DuckDB\Types\TypeRegistrar;
 use PHPUnit\Framework\Attributes\After;
 use PHPUnit\Framework\Attributes\Before;
 use PHPUnit\Framework\Attributes\RequiresPhpExtension;
 use PHPUnit\Framework\TestCase;
+use Symfony\Component\DependencyInjection\ContainerBuilder;
 use Symfony\Component\DependencyInjection\ContainerInterface;
 use Symfony\Component\Filesystem\Filesystem;
 
+use function array_column;
 use function array_keys;
 use function bin2hex;
 use function random_bytes;
@@ -220,6 +227,60 @@ final class DuckDBBundleTest extends TestCase
         self::assertTrue($analytics->omitsForeignKeys());
     }
 
+    /** Every DuckDB connection logs schema notices, such as a dropped collation, to the application's logger. */
+    public function testLogsSchemaNoticesOnEveryDuckDBConnection(): void
+    {
+        $container = $this->bootKernel(
+            [
+                'doctrine' => [
+                    'dbal' => [
+                        'default_connection' => 'default',
+                        'connections' => [
+                            'default' => ['url' => 'duckdb://localhost'],
+                            'analytics' => ['url' => 'duckdb://localhost'],
+                        ],
+                    ],
+                ],
+                'duckdb' => ['omit_foreign_keys' => ['analytics']],
+            ],
+            static function (ContainerBuilder $container): void {
+                $container->register('logger', RecordingLogger::class)->setPublic(true);
+            },
+        );
+
+        $logger = $container->get('logger');
+        self::assertInstanceOf(RecordingLogger::class, $logger);
+
+        foreach (['default', 'analytics'] as $name) {
+            $connection = self::connection($container, $name);
+            $connection->executeStatement('CREATE TABLE t (id INTEGER PRIMARY KEY, code VARCHAR COLLATE NOCASE)');
+
+            $schemaManager = $connection->createSchemaManager();
+            $current       = $schemaManager->introspectSchema();
+            $table         = $current->getTable('t')->edit()
+                ->modifyColumnByUnquotedName('code', static function (ColumnEditor $column): void {
+                    $column->setTypeName(Types::INTEGER);
+                })
+                ->create();
+
+            $schemaManager->alterSchema($schemaManager->createComparator()->compareSchemas($current, new Schema([$table])));
+        }
+
+        self::assertSame(
+            [
+                'DuckDB drops the collation NOCASE of column t.code: its new type INTEGER has no collation; only '
+                    . 'VARCHAR columns have one.',
+                'DuckDB drops the collation NOCASE of column t.code: its new type INTEGER has no collation; only '
+                    . 'VARCHAR columns have one.',
+            ],
+            array_column($logger->records, 'message'),
+        );
+
+        $analytics = self::connection($container, 'analytics')->getDatabasePlatform();
+        self::assertInstanceOf(DuckDBPlatform::class, $analytics);
+        self::assertTrue($analytics->omitsForeignKeys());
+    }
+
     /** R32: every entity manager deletes the subclass rows of a removed JOINED-inheritance entity. */
     public function testEveryEntityManagerDeletesTheSubclassRowsOfARemovedJoinedEntity(): void
     {
@@ -268,10 +329,13 @@ final class DuckDBBundleTest extends TestCase
         }
     }
 
-    /** @param array<string, array<string, mixed>> $extensionConfigs */
-    private function bootKernel(array $extensionConfigs): ContainerInterface
+    /**
+     * @param array<string, array<string, mixed>>    $extensionConfigs
+     * @param (Closure(ContainerBuilder): void)|null $configureContainer
+     */
+    private function bootKernel(array $extensionConfigs, Closure|null $configureContainer = null): ContainerInterface
     {
-        $kernel = new TestKernel($this->directory, $extensionConfigs);
+        $kernel = new TestKernel($this->directory, $extensionConfigs, $configureContainer);
         $kernel->boot();
 
         $this->kernels[] = $kernel;

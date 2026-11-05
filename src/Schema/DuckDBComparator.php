@@ -18,9 +18,11 @@ use Doctrine\DBAL\Schema\Schema;
 use Doctrine\DBAL\Schema\SchemaDiff;
 use Doctrine\DBAL\Schema\Table;
 use Doctrine\DBAL\Schema\TableDiff;
+use Doctrine\DBAL\Types\Type;
 use MartinJuul\DBAL\DuckDB\Platform\DuckDBPlatform;
 use MartinJuul\DBAL\DuckDB\Platform\ForeignKeyCycles;
 
+use function array_intersect_key;
 use function array_keys;
 use function array_map;
 use function array_merge;
@@ -84,7 +86,9 @@ use function trim;
  * With a connection, each rebuild also carries what DBAL cannot represent of
  * its table: the indexes on expressions, the CHECK constraints other than
  * minimum and maximum values, and the columns' collations, so that the
- * rebuild recreates them.
+ * rebuild recreates them. A native ALTER COLUMN TYPE to a type without
+ * collation drops a column's collation, which the platform's logger records
+ * as a notice.
  *
  * @phpstan-import-type CatalogCheck from RebuildPlan
  * @phpstan-import-type ExpressionIndex from RebuildPlan
@@ -172,6 +176,65 @@ final class DuckDBComparator extends Comparator
         }
 
         return self::addCatalogDetails($connection, $platform, $rebuilds, self::readCurrentSchema($connection));
+    }
+
+    /**
+     * Logs a notice for each collated column that the native ALTER statements
+     * of a table diff give a type without collation, which drops the
+     * collation.
+     *
+     * @param array<string, TableDiff> $diffs The natively altered tables' diffs, keyed by {@see RebuildPlan::tableKey()}.
+     *
+     * @throws Exception
+     */
+    public static function noticeDroppedCollations(Connection $connection, DuckDBPlatform $platform, array $diffs): void
+    {
+        self::logDroppedCollations($connection, $platform, $diffs, null);
+    }
+
+    /**
+     * @param array<string, TableDiff> $diffs
+     *
+     * @throws Exception
+     */
+    private static function logDroppedCollations(
+        Connection $connection,
+        DuckDBPlatform $platform,
+        array $diffs,
+        mixed $currentSchema,
+    ): void {
+        $retyped = [];
+
+        foreach ($diffs as $key => $diff) {
+            foreach ($diff->getChangedColumns() as $columnDiff) {
+                $new  = $columnDiff->getNewColumn();
+                $type = Type::getType($new->getTypeName())->getSQLDeclaration($new->toArray(true), $platform);
+
+                if (DuckDBPlatform::isCollatableType($type)) {
+                    continue;
+                }
+
+                $retyped[$key][] = [$columnDiff->getOldColumn(), $type];
+            }
+        }
+
+        if (count($retyped) === 0) {
+            return;
+        }
+
+        $collations = self::readCollations($connection, $currentSchema ?? self::readCurrentSchema($connection));
+
+        foreach ($retyped as $key => $columns) {
+            foreach ($columns as [$old, $type]) {
+                $collation = $collations[$key][RebuildPlan::columnKey($old)] ?? null;
+
+                if ($collation === null) {
+                    continue;
+                }
+
+                $platform->noticeDroppedCollation($diffs[$key]->getOldTable()->getObjectName(), $old, $collation, $type);
+            }
+        }
     }
 
     /**
@@ -396,6 +459,13 @@ final class DuckDBComparator extends Comparator
             if (count($rebuilds) > 0) {
                 $rebuilds = self::addCatalogDetails($this->connection, $this->platform, $rebuilds, $currentSchema);
             }
+
+            self::logDroppedCollations(
+                $this->connection,
+                $this->platform,
+                array_intersect_key($diffs, $native),
+                $currentSchema,
+            );
         }
 
         return new RebuildPlan($native, $rebuilds, $newOmitted, $oldOmitted);

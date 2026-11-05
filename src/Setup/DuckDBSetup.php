@@ -10,10 +10,12 @@ use Doctrine\DBAL\Tools\DsnParser;
 use Doctrine\ORM\Configuration as ORMConfiguration;
 use Doctrine\ORM\Mapping\ClassMetadata;
 use MartinJuul\DBAL\DuckDB\Driver;
+use MartinJuul\DBAL\DuckDB\Driver\Middleware\LogSchemaNotices;
 use MartinJuul\DBAL\DuckDB\Driver\Middleware\OmitForeignKeys;
 use MartinJuul\DBAL\DuckDB\ORM\JoinedSubclassRowsListener;
 use MartinJuul\DBAL\DuckDB\Platform\DuckDBPlatform;
 use MartinJuul\DBAL\DuckDB\Types\TypeRegistrar;
+use Psr\Log\LoggerInterface;
 
 use function array_merge;
 
@@ -70,6 +72,19 @@ final class DuckDBSetup
     {
         $middlewares   = $configuration->getMiddlewares();
         $middlewares[] = new OmitForeignKeys();
+
+        $configuration->setMiddlewares($middlewares);
+    }
+
+    /**
+     * Logs, as notices, the schema changes on DuckDB connections that use the
+     * configuration which lose something DuckDB cannot carry over, such as a
+     * column's collation when the column gets a type without one.
+     */
+    public static function logSchemaNotices(DBALConfiguration $configuration, LoggerInterface $logger): void
+    {
+        $middlewares   = $configuration->getMiddlewares();
+        $middlewares[] = new LogSchemaNotices($logger);
 
         $configuration->setMiddlewares($middlewares);
     }
