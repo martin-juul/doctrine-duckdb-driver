@@ -38,9 +38,10 @@ Leave out `dbname` for an in-memory database.
 
 ## Quick start with the ORM
 
-ORM needs one extra step: `DuckDBSetup::configureOrm()` registers the package's types and makes the default (`AUTO`) identifier strategy use sequences. Without it, every entity with a default generated ID fails to persist, because DuckDB has no identity columns.
+ORM needs two extra steps. `DuckDBSetup::configureOrm()` registers the package's types and makes the default (`AUTO`) identifier strategy use sequences; without it, every entity with a default generated ID fails to persist, because DuckDB has no identity columns. `DuckDBSetup::registerListeners()` deletes the subclass rows of entities mapped with JOINED inheritance when they are removed.
 
 ```php
+use Doctrine\Common\EventManager;
 use Doctrine\DBAL\DriverManager;
 use Doctrine\ORM\EntityManager;
 use Doctrine\ORM\ORMSetup;
@@ -51,8 +52,11 @@ $config = ORMSetup::createAttributeMetadataConfig([__DIR__ . '/src/Entity'], isD
 $config->enableNativeLazyObjects(true);
 DuckDBSetup::configureOrm($config);
 
+$eventManager = new EventManager();
+DuckDBSetup::registerListeners($eventManager);
+
 $connection    = DriverManager::getConnection(['driverClass' => Driver::class, 'dbname' => 'var/app.duckdb'], $config);
-$entityManager = new EntityManager($connection, $config);
+$entityManager = new EntityManager($connection, $config, $eventManager);
 ```
 
 Symfony applications register `DuckDBBundle` instead and need only a `duckdb://` database URL. See [docs/setup.md](docs/setup.md).
@@ -74,7 +78,7 @@ Most of these fail loudly with an error that explains the limit. [docs/limitatio
 - No row locks: `forUpdate()` and ORM's pessimistic locks throw. Use optimistic locking.
 - `lastInsertId()` throws. Use `INSERT … RETURNING` or sequences.
 - Nested transactions are flattened. A rollback at an inner level makes the whole transaction roll back.
-- Foreign keys support only `NO ACTION` and `RESTRICT`, cannot form cycles between tables, and DuckDB checks them earlier than other databases.
+- Foreign keys that ask for `CASCADE`, `SET NULL` or `SET DEFAULT` are left out, because DuckDB cannot enforce them; the application enforces those relations. Other foreign keys are real, cannot form cycles between tables, and DuckDB checks them earlier than other databases.
 - String and binary lengths are not enforced: `VARCHAR(255)` becomes `VARCHAR`.
 - Some schema changes rebuild whole tables, which costs memory and time on large tables.
 - Across processes, a database file has either one writer or many readers, never both. See [docs/deployment.md](docs/deployment.md).
