@@ -1,16 +1,18 @@
 diff --git a/tests/Tests/OrmFunctionalTestCase.php b/tests/Tests/OrmFunctionalTestCase.php
-index bc0365f..806617b 100644
+index bc0365f..041a418 100644
 --- a/tests/Tests/OrmFunctionalTestCase.php
 +++ b/tests/Tests/OrmFunctionalTestCase.php
-@@ -170,6 +170,7 @@ use Doctrine\Tests\Models\VersionedManyToOne\Article;
+@@ -169,7 +169,9 @@ use Doctrine\Tests\Models\ValueConversionType\OwningOneToOneEntity;
+ use Doctrine\Tests\Models\VersionedManyToOne\Article;
  use Doctrine\Tests\Models\VersionedManyToOne\Category;
  use Exception;
++use MartinJuul\DBAL\DuckDB\Setup\DuckDBSetup;
  use PHPUnit\Framework\AssertionFailedError;
 +use PHPUnit\Framework\Attributes\Before;
  use PHPUnit\Framework\Constraint\Count;
  use Psr\Cache\CacheItemPoolInterface;
  use RuntimeException;
-@@ -835,6 +836,16 @@ abstract class OrmFunctionalTestCase extends OrmTestCase
+@@ -835,6 +837,16 @@ abstract class OrmFunctionalTestCase extends OrmTestCase
          }
      }
 
@@ -27,6 +29,17 @@ index bc0365f..806617b 100644
      /**
       * Creates a connection to the test database, if there is none yet, and
       * creates the necessary tables.
+@@ -982,6 +994,10 @@ abstract class OrmFunctionalTestCase extends OrmTestCase
+             $evm->addEventListener(['onFlush'], new DebugUnitOfWorkListener());
+         }
+
++        // DuckDB: deletes JOINED subclass rows, whose ON DELETE CASCADE keys
++        // the platform omits (R32). The listener ignores other platforms.
++        DuckDBSetup::registerListeners($evm);
++
+         return new EntityManager($conn, $config, $evm);
+     }
+
 diff --git a/tests/Tests/TestUtil.php b/tests/Tests/TestUtil.php
 index 918fcde..85b7bcd 100644
 --- a/tests/Tests/TestUtil.php

@@ -28,9 +28,21 @@ return [
             'early FK checks',
             'DuckDB 2.0 checks foreign keys when each statement runs and does not see references removed earlier in the same transaction, so ORM flushes that delete or re-key referenced rows fail (R28).',
         ],
-        'fk-actions' => [
-            'FK referential actions',
-            'DuckDB 2.0 supports only NO ACTION and RESTRICT and does not store the action, so other actions are rejected (R13) and RESTRICT introspects as NO ACTION.',
+        'omitted-fk-actions' => [
+            'omitted referential actions',
+            'DuckDB 2.0 enforces only NO ACTION and RESTRICT, so the platform leaves a foreign key that requests CASCADE, SET NULL or SET DEFAULT out of the DDL and the application enforces that relation (R13); introspection finds no such key.',
+        ],
+        'restrict-action' => [
+            'RESTRICT stored as NO ACTION',
+            'DuckDB 2.0 does not store a foreign key\'s referential action, so a RESTRICT key introspects as NO ACTION.',
+        ],
+        'unique-index-reference' => [
+            'foreign keys to unique indexes',
+            'DuckDB 2.0 accepts a foreign key only to a PRIMARY KEY or UNIQUE constraint, and the platform declares a unique constraint that no foreign key of the same batch or comparator rebuild references as a unique index (KTD11), so a later foreign key to it is refused.',
+        ],
+        'unsigned' => [
+            'unsigned integers',
+            'DBAL\'s unsigned option is a MySQL and SQLite declaration; the DuckDB platform ignores it as PostgreSQL\'s does, while the tests exempt only PostgreSQL and SQL Server by platform class.',
         ],
         'fk-cycles' => [
             'FK cycles',
@@ -59,6 +71,10 @@ return [
         'row-order' => [
             'unordered results',
             'The test expects rows in insertion order from a query without ORDER BY, which SQL does not promise; DuckDB\'s parallel hash joins return joined rows in an order that depends on earlier activity, so the test fails in the full suite and may pass alone.',
+        ],
+        'leftover-sequences' => [
+            'ID sequences left behind',
+            'IDs come from sequences (R14), and the test drops its tables itself but their sequences only on PostgreSQL, so creating the tables again fails on the existing sequence and every test of the class but the first that runs fails.',
         ],
         'embedded' => [
             'embedded engine',
@@ -144,35 +160,35 @@ return [
             'Creates two tables that reference each other.',
         ],
         'Doctrine\DBAL\Tests\Functional\Schema\ForeignKeyConstraintTest::testOnUpdateIntrospection#CASCADE' => [
-            'fk-actions',
-            'Creates a foreign key with ON UPDATE CASCADE.',
+            'omitted-fk-actions',
+            'Creates a foreign key with ON UPDATE CASCADE, which the platform leaves out, and expects to introspect it.',
         ],
         'Doctrine\DBAL\Tests\Functional\Schema\ForeignKeyConstraintTest::testOnUpdateIntrospection#SET NULL' => [
-            'fk-actions',
-            'Creates a foreign key with ON UPDATE SET NULL.',
+            'omitted-fk-actions',
+            'Creates a foreign key with ON UPDATE SET NULL, which the platform leaves out, and expects to introspect it.',
         ],
         'Doctrine\DBAL\Tests\Functional\Schema\ForeignKeyConstraintTest::testOnUpdateIntrospection#SET DEFAULT' => [
-            'fk-actions',
-            'Creates a foreign key with ON UPDATE SET DEFAULT.',
+            'omitted-fk-actions',
+            'Creates a foreign key with ON UPDATE SET DEFAULT, which the platform leaves out, and expects to introspect it.',
         ],
         'Doctrine\DBAL\Tests\Functional\Schema\ForeignKeyConstraintTest::testOnUpdateIntrospection#RESTRICT' => [
-            'fk-actions',
+            'restrict-action',
             'Expects ON UPDATE RESTRICT back from introspection.',
         ],
         'Doctrine\DBAL\Tests\Functional\Schema\ForeignKeyConstraintTest::testOnDeleteIntrospection#CASCADE' => [
-            'fk-actions',
-            'Creates a foreign key with ON DELETE CASCADE.',
+            'omitted-fk-actions',
+            'Creates a foreign key with ON DELETE CASCADE, which the platform leaves out, and expects to introspect it.',
         ],
         'Doctrine\DBAL\Tests\Functional\Schema\ForeignKeyConstraintTest::testOnDeleteIntrospection#SET NULL' => [
-            'fk-actions',
-            'Creates a foreign key with ON DELETE SET NULL.',
+            'omitted-fk-actions',
+            'Creates a foreign key with ON DELETE SET NULL, which the platform leaves out, and expects to introspect it.',
         ],
         'Doctrine\DBAL\Tests\Functional\Schema\ForeignKeyConstraintTest::testOnDeleteIntrospection#SET DEFAULT' => [
-            'fk-actions',
-            'Creates a foreign key with ON DELETE SET DEFAULT.',
+            'omitted-fk-actions',
+            'Creates a foreign key with ON DELETE SET DEFAULT, which the platform leaves out, and expects to introspect it.',
         ],
         'Doctrine\DBAL\Tests\Functional\Schema\ForeignKeyConstraintTest::testOnDeleteIntrospection#RESTRICT' => [
-            'fk-actions',
+            'restrict-action',
             'Expects ON DELETE RESTRICT back from introspection.',
         ],
         'Doctrine\DBAL\Tests\Functional\Schema\ForeignKeyConstraintTest::testColumnIntrospection' => [
@@ -182,6 +198,22 @@ return [
         'Doctrine\DBAL\Tests\Functional\Schema\SchemaManagerTest::testIntrospectTableUniqueConstraints' => [
             'constraint-names',
             'Expects a named unique constraint back from introspection.',
+        ],
+        'Doctrine\DBAL\Tests\Functional\Schema\SchemaManagerTest::testIntrospectTableUniqueConstraintsInNonDefaultSchema' => [
+            'constraint-names',
+            'Expects a unique constraint in another schema back from introspection, which finds a unique index.',
+        ],
+        'Doctrine\DBAL\Tests\Functional\Schema\SchemaManagerTest::testIntrospectAllTablesUniqueConstraintsInNonDefaultSchema' => [
+            'constraint-names',
+            'Expects a unique constraint in another schema back from introspection, which finds a unique index.',
+        ],
+        'Doctrine\DBAL\Tests\Functional\Schema\AlterTableTest::testReplaceForeignKeyConstraint' => [
+            'unique-index-reference',
+            'Creates articles with a unique constraint on sku on its own, then replaces a foreign key of orders with one to sku through alterTable(), which rebuilds only orders.',
+        ],
+        'Doctrine\DBAL\Tests\Functional\Schema\ColumnRenameTest::testRenameColumnInForeignKeyConstraint' => [
+            'unique-index-reference',
+            'Creates rename_column_referenced with a unique constraint on (c1, c2) on its own, then creates a table whose foreign key references those columns.',
         ],
         'Doctrine\DBAL\Tests\Functional\Platform\AlterColumnLengthChangeTest::testColumnLengthIsChanged' => [
             'lengths',
@@ -206,6 +238,38 @@ return [
     ],
 
     'orm' => [
+        'Doctrine\Tests\ORM\Functional\Ticket\DDC832Test::testQuotedTableBasicRemove' => [
+            'leftover-sequences',
+            'tearDown() drops the INDEX, TREE_INDEX and LIKE tables, and their ID sequences only on PostgreSQL.',
+        ],
+        'Doctrine\Tests\ORM\Functional\Ticket\DDC832Test::testQuotedTableJoinedUpdate' => [
+            'leftover-sequences',
+            'tearDown() drops the INDEX, TREE_INDEX and LIKE tables, and their ID sequences only on PostgreSQL.',
+        ],
+        'Doctrine\Tests\ORM\Functional\Ticket\DDC832Test::testQuotedTableJoinedRemove' => [
+            'leftover-sequences',
+            'tearDown() drops the INDEX, TREE_INDEX and LIKE tables, and their ID sequences only on PostgreSQL.',
+        ],
+        'Doctrine\Tests\ORM\Functional\Ticket\DDC832Test::testQuotedTableJoinedChildUpdate' => [
+            'leftover-sequences',
+            'tearDown() drops the INDEX, TREE_INDEX and LIKE tables, and their ID sequences only on PostgreSQL.',
+        ],
+        'Doctrine\Tests\ORM\Functional\Ticket\DDC832Test::testQuotedTableJoinedChildRemove' => [
+            'leftover-sequences',
+            'tearDown() drops the INDEX, TREE_INDEX and LIKE tables, and their ID sequences only on PostgreSQL.',
+        ],
+        'Doctrine\Tests\ORM\Functional\DatabaseDriverTest::testLoadMetadataFromDatabase' => [
+            'lengths',
+            'Expects the VARCHAR length 200 back from introspection.',
+        ],
+        'Doctrine\Tests\ORM\Functional\DatabaseDriverTest::testLoadMetadataFromDatabaseDetail' => [
+            'unsigned',
+            'Expects the unsigned option of an integer column back from introspection.',
+        ],
+        'Doctrine\Tests\ORM\Functional\Ticket\DDC2252Test::testIssue' => [
+            'early-fk',
+            'Its flush sets the primary key of a referenced ddc2252_mch_account row to its own value, which DuckDB runs as a delete and an insert of a referenced row.',
+        ],
         'Doctrine\Tests\ORM\Functional\EntityRepositoryTest::testFindFieldByMagicCall' => [
             'row-order',
             'Expects findByStatus() to return Guilherme before Alexander; the query left-joins cms_addresses for the eager association and has no ORDER BY.',
@@ -371,2108 +435,1160 @@ return [
             'Its flush deletes or updates a referenced row after removing the references in the same transaction.',
         ],
         'Doctrine\Tests\ORM\Functional\Ticket\GH8443Test::testJoinRootEntityWithOnlyOneEntityInHierarchy' => [
-            'early-fk',
-            'Its flush deletes or updates a referenced row after removing the references in the same transaction.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\ValueConversionType\ManyToManyCompositeIdForeignKeyTest::testThatTheJoinTableRowsAreRemovedWhenRemovingTheAssociation' => [
             'early-fk',
             'Its flush deletes or updates a referenced row after removing the references in the same transaction.',
         ],
         'Doctrine\Tests\ORM\Functional\AdvancedDqlQueryTest::testAggregateWithHavingClause' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\AdvancedDqlQueryTest::testCommentsInDQL' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\AdvancedDqlQueryTest::testDeleteAs' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\AdvancedDqlQueryTest::testGroupByMultipleFields' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\AdvancedDqlQueryTest::testInSubselect' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\AdvancedDqlQueryTest::testIsNullAssociation' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\AdvancedDqlQueryTest::testOrderByGeneralCaseExpression' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\AdvancedDqlQueryTest::testOrderByResultVariableCollectionSize' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\AdvancedDqlQueryTest::testOrderBySimpleCaseExpression' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\AdvancedDqlQueryTest::testSelectSubselect' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\AdvancedDqlQueryTest::testUnnamedScalarResultsAreOneBased' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\AdvancedDqlQueryTest::testUpdateAs' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\CascadeRemoveOrderTest::testMany' => [
-            'fk-actions',
-            'Uses a many-to-many association whose default join columns ORM declares with ON DELETE CASCADE (CascadeRemoveOrderEntityO).',
+            'early-fk',
+            'Its flush deletes or updates a referenced row after removing the references in the same transaction.',
         ],
         'Doctrine\Tests\ORM\Functional\CascadeRemoveOrderTest::testSingle' => [
-            'fk-actions',
-            'Uses a many-to-many association whose default join columns ORM declares with ON DELETE CASCADE (CascadeRemoveOrderEntityO).',
-        ],
-        'Doctrine\Tests\ORM\Functional\ClassTableInheritanceSecondTest::testManyToManyToCTIHierarchy' => [
-            'fk-actions',
-            'Uses a many-to-many association whose default join columns ORM declares with ON DELETE CASCADE (cti_children).',
-        ],
-        'Doctrine\Tests\ORM\Functional\ClassTableInheritanceSecondTest::testOneToOneAssocToBaseTypeBidirectional' => [
-            'fk-actions',
-            'Uses a many-to-many association whose default join columns ORM declares with ON DELETE CASCADE (cti_children).',
+            'early-fk',
+            'Its flush deletes or updates a referenced row after removing the references in the same transaction.',
         ],
         'Doctrine\Tests\ORM\Functional\ClassTableInheritanceTest::testBulkUpdateIssueDDC368' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\ClassTableInheritanceTest::testBulkUpdateNonScalarParameterDDC1341' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\ClassTableInheritanceTest::testCRUD' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\ClassTableInheritanceTest::testDeleteJoinTableRecords' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\ClassTableInheritanceTest::testExistsSubclass' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\ClassTableInheritanceTest::testFindByAssociation' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\ClassTableInheritanceTest::testFindOnBaseClass' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\ClassTableInheritanceTest::testGetReferenceEntityWithSubclasses' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\ClassTableInheritanceTest::testGetSubClassManyToManyCollection' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\ClassTableInheritanceTest::testLazyLoading1' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\ClassTableInheritanceTest::testLazyLoading2' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\ClassTableInheritanceTest::testMatching' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\ClassTableInheritanceTest::testMultiLevelUpdateAndFind' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\ClassTableInheritanceTest::testQueryForInheritedSingleValuedAssociation' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\ClassTableInheritanceTest::testSelfReferencingManyToMany' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\ClassTableInheritanceTest::testSelfReferencingOneToOne' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\EntityListenersTest::testPostLoadListeners' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\EntityListenersTest::testPostPersistCalledAfterAllInsertsHaveBeenPerformedAndIdsHaveBeenAssigned' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\EntityListenersTest::testPostPersistListeners' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\EntityListenersTest::testPostRemoveCalledAfterAllRemovalsHaveBeenPerformed' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\EntityListenersTest::testPostRemoveListeners' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\EntityListenersTest::testPostUpdateListeners' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\EntityListenersTest::testPreFlushListeners' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\EntityListenersTest::testPrePersistListeners' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\EntityListenersTest::testPreRemoveListeners' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\EntityListenersTest::testPreUpdateListeners' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
-        ],
-        'Doctrine\Tests\ORM\Functional\EnumTest::testEnumCollectionMatchingOnManyToMany' => [
-            'fk-actions',
-            'Uses a many-to-many association whose default join columns ORM declares with ON DELETE CASCADE (bookwithgenre_bookcategory).',
-        ],
-        'Doctrine\Tests\ORM\Functional\EnumTest::testEnumCollectionMatchingOnOneToMany' => [
-            'fk-actions',
-            'Uses a many-to-many association whose default join columns ORM declares with ON DELETE CASCADE (bookwithgenre_bookcategory).',
-        ],
-        'Doctrine\Tests\ORM\Functional\ExtraLazyCollectionTest::testContainsKeyIndexByManyToMany' => [
-            'fk-actions',
-            'Uses JOINED inheritance, for which ORM generates ON DELETE CASCADE from DDC2504ChildClass to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\ExtraLazyCollectionTest::testContainsKeyIndexByManyToManyNonOwning' => [
-            'fk-actions',
-            'Uses JOINED inheritance, for which ORM generates ON DELETE CASCADE from DDC2504ChildClass to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\ExtraLazyCollectionTest::testContainsKeyIndexByOneToMany' => [
-            'fk-actions',
-            'Uses JOINED inheritance, for which ORM generates ON DELETE CASCADE from DDC2504ChildClass to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\ExtraLazyCollectionTest::testContainsKeyIndexByOneToManyJoinedInheritance' => [
-            'fk-actions',
-            'Uses JOINED inheritance, for which ORM generates ON DELETE CASCADE from DDC2504ChildClass to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\ExtraLazyCollectionTest::testContainsKeyIndexByWithPkManyToMany' => [
-            'fk-actions',
-            'Uses JOINED inheritance, for which ORM generates ON DELETE CASCADE from DDC2504ChildClass to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\ExtraLazyCollectionTest::testContainsKeyIndexByWithPkManyToManyNonOwning' => [
-            'fk-actions',
-            'Uses JOINED inheritance, for which ORM generates ON DELETE CASCADE from DDC2504ChildClass to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\ExtraLazyCollectionTest::testContainsKeyNonExistentIndexByManyToMany' => [
-            'fk-actions',
-            'Uses JOINED inheritance, for which ORM generates ON DELETE CASCADE from DDC2504ChildClass to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\ExtraLazyCollectionTest::testContainsKeyNonExistentIndexByOneToMany' => [
-            'fk-actions',
-            'Uses JOINED inheritance, for which ORM generates ON DELETE CASCADE from DDC2504ChildClass to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\ExtraLazyCollectionTest::testContainsManyToMany' => [
-            'fk-actions',
-            'Uses JOINED inheritance, for which ORM generates ON DELETE CASCADE from DDC2504ChildClass to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\ExtraLazyCollectionTest::testContainsManyToManyInverse' => [
-            'fk-actions',
-            'Uses JOINED inheritance, for which ORM generates ON DELETE CASCADE from DDC2504ChildClass to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\ExtraLazyCollectionTest::testContainsOnOneToManyJoinedInheritanceWillNotCauseQueriesWhenNonPersistentItemIsMatched' => [
-            'fk-actions',
-            'Uses JOINED inheritance, for which ORM generates ON DELETE CASCADE from DDC2504ChildClass to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\ExtraLazyCollectionTest::testContainsOnOneToManyJoinedInheritanceWillNotInitializeCollectionWhenMatchingItemIsFound' => [
-            'fk-actions',
-            'Uses JOINED inheritance, for which ORM generates ON DELETE CASCADE from DDC2504ChildClass to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\ExtraLazyCollectionTest::testContainsOnOneToManyJoinedInheritanceWillNotInitializeCollectionWithClearStateMatchingItem' => [
-            'fk-actions',
-            'Uses JOINED inheritance, for which ORM generates ON DELETE CASCADE from DDC2504ChildClass to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\ExtraLazyCollectionTest::testContainsOnOneToManyJoinedInheritanceWillNotInitializeCollectionWithNewStateNotMatchingItem' => [
-            'fk-actions',
-            'Uses JOINED inheritance, for which ORM generates ON DELETE CASCADE from DDC2504ChildClass to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\ExtraLazyCollectionTest::testContainsOneToMany' => [
-            'fk-actions',
-            'Uses JOINED inheritance, for which ORM generates ON DELETE CASCADE from DDC2504ChildClass to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\ExtraLazyCollectionTest::testCountAfterAddThenFlush' => [
-            'fk-actions',
-            'Uses JOINED inheritance, for which ORM generates ON DELETE CASCADE from DDC2504ChildClass to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\ExtraLazyCollectionTest::testCountInverseCollection' => [
-            'fk-actions',
-            'Uses JOINED inheritance, for which ORM generates ON DELETE CASCADE from DDC2504ChildClass to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\ExtraLazyCollectionTest::testCountNotInitializesCollection' => [
-            'fk-actions',
-            'Uses JOINED inheritance, for which ORM generates ON DELETE CASCADE from DDC2504ChildClass to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\ExtraLazyCollectionTest::testCountOneToMany' => [
-            'fk-actions',
-            'Uses JOINED inheritance, for which ORM generates ON DELETE CASCADE from DDC2504ChildClass to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\ExtraLazyCollectionTest::testCountOneToManyJoinedInheritance' => [
-            'fk-actions',
-            'Uses JOINED inheritance, for which ORM generates ON DELETE CASCADE from DDC2504ChildClass to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\ExtraLazyCollectionTest::testCountWhenInitialized' => [
-            'fk-actions',
-            'Uses JOINED inheritance, for which ORM generates ON DELETE CASCADE from DDC2504ChildClass to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\ExtraLazyCollectionTest::testCountWhenNewEntityPresent' => [
-            'fk-actions',
-            'Uses JOINED inheritance, for which ORM generates ON DELETE CASCADE from DDC2504ChildClass to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\ExtraLazyCollectionTest::testCountingOnOneToManyJoinedInheritanceWillNotInitializeCollection' => [
-            'fk-actions',
-            'Uses JOINED inheritance, for which ORM generates ON DELETE CASCADE from DDC2504ChildClass to its root table.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\ExtraLazyCollectionTest::testFirstOnEmptyCollectionWhenInitialized' => [
-            'fk-actions',
-            'Uses JOINED inheritance, for which ORM generates ON DELETE CASCADE from DDC2504ChildClass to its root table.',
+            'early-fk',
+            'Its flush deletes or updates a referenced row after removing the references in the same transaction.',
         ],
         'Doctrine\Tests\ORM\Functional\ExtraLazyCollectionTest::testFirstOnEmptyCollectionWhenNotInitialized' => [
-            'fk-actions',
-            'Uses JOINED inheritance, for which ORM generates ON DELETE CASCADE from DDC2504ChildClass to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\ExtraLazyCollectionTest::testFirstWhenInitialized' => [
-            'fk-actions',
-            'Uses JOINED inheritance, for which ORM generates ON DELETE CASCADE from DDC2504ChildClass to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\ExtraLazyCollectionTest::testFirstWhenNotInitialized' => [
-            'fk-actions',
-            'Uses JOINED inheritance, for which ORM generates ON DELETE CASCADE from DDC2504ChildClass to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\ExtraLazyCollectionTest::testFullSlice' => [
-            'fk-actions',
-            'Uses JOINED inheritance, for which ORM generates ON DELETE CASCADE from DDC2504ChildClass to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\ExtraLazyCollectionTest::testGetIndexByIdentifier' => [
-            'fk-actions',
-            'Uses JOINED inheritance, for which ORM generates ON DELETE CASCADE from DDC2504ChildClass to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\ExtraLazyCollectionTest::testGetIndexByManyToManyInverseSide' => [
-            'fk-actions',
-            'Uses JOINED inheritance, for which ORM generates ON DELETE CASCADE from DDC2504ChildClass to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\ExtraLazyCollectionTest::testGetIndexByManyToManyOwningSide' => [
-            'fk-actions',
-            'Uses JOINED inheritance, for which ORM generates ON DELETE CASCADE from DDC2504ChildClass to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\ExtraLazyCollectionTest::testGetIndexByOneToMany' => [
-            'fk-actions',
-            'Uses JOINED inheritance, for which ORM generates ON DELETE CASCADE from DDC2504ChildClass to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\ExtraLazyCollectionTest::testGetNonExistentIndexBy' => [
-            'fk-actions',
-            'Uses JOINED inheritance, for which ORM generates ON DELETE CASCADE from DDC2504ChildClass to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\ExtraLazyCollectionTest::testLazyOneToManyJoinedInheritanceIsLazilyInitialized' => [
-            'fk-actions',
-            'Uses JOINED inheritance, for which ORM generates ON DELETE CASCADE from DDC2504ChildClass to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\ExtraLazyCollectionTest::testSlice' => [
-            'fk-actions',
-            'Uses JOINED inheritance, for which ORM generates ON DELETE CASCADE from DDC2504ChildClass to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\ExtraLazyCollectionTest::testSliceInitializedCollection' => [
-            'fk-actions',
-            'Uses JOINED inheritance, for which ORM generates ON DELETE CASCADE from DDC2504ChildClass to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\ExtraLazyCollectionTest::testSliceInverseCollection' => [
-            'fk-actions',
-            'Uses JOINED inheritance, for which ORM generates ON DELETE CASCADE from DDC2504ChildClass to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\ExtraLazyCollectionTest::testSliceOnDirtyCollection' => [
-            'fk-actions',
-            'Uses JOINED inheritance, for which ORM generates ON DELETE CASCADE from DDC2504ChildClass to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\ExtraLazyCollectionTest::testSliceOneToMany' => [
-            'fk-actions',
-            'Uses JOINED inheritance, for which ORM generates ON DELETE CASCADE from DDC2504ChildClass to its root table.',
+            'early-fk',
+            'Its flush deletes or updates a referenced row after removing the references in the same transaction.',
         ],
         'Doctrine\Tests\ORM\Functional\GH11345Test::testUpdateSqlStatementsAreIssuedInAlphabeticOrderByEntityClass' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\GH11345Test::testUpdateSqlStatementsAreIssuedInAlphabeticOrderByEntityIdForSameClassName' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\GH8011Test::testOrderWithArithmeticExpressionWithLiteralAndResultVariable' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\GH8011Test::testOrderWithArithmeticExpressionWithLiteralAndResultVariable2' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\GH8011Test::testOrderWithArithmeticExpressionWithLiteralAndResultVariableUsingHiddenResultVariable' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\GH8011Test::testOrderWithArithmeticExpressionWithLiteralAndSingleValuedPathExpression' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\GH8011Test::testOrderWithArithmeticExpressionWithLiteralAndSingleValuedPathExpression2' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\GH8011Test::testOrderWithArithmeticExpressionWithResultVariableAndLiteral' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\GH8011Test::testOrderWithArithmeticExpressionWithResultVariableAndLiteral2' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\GH8011Test::testOrderWithArithmeticExpressionWithResultVariableAndSingleValuedPathExpression' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\GH8011Test::testOrderWithArithmeticExpressionWithResultVariableAndSingleValuedPathExpression2' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\GH8011Test::testOrderWithArithmeticExpressionWithSingleValuedPathExpression' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\GH8011Test::testOrderWithArithmeticExpressionWithSingleValuedPathExpressionAndLiteral' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\GH8011Test::testOrderWithArithmeticExpressionWithSingleValuedPathExpressionAndResultVariable' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
-        ],
-        'Doctrine\Tests\ORM\Functional\IndexByAssociationTest::testDqlOverrideIndexBy' => [
-            'fk-actions',
-            'Uses a many-to-many association whose default join columns ORM declares with ON DELETE CASCADE (exchange_bonds_stocks).',
-        ],
-        'Doctrine\Tests\ORM\Functional\IndexByAssociationTest::testManyToMany' => [
-            'fk-actions',
-            'Uses a many-to-many association whose default join columns ORM declares with ON DELETE CASCADE (exchange_bonds_stocks).',
-        ],
-        'Doctrine\Tests\ORM\Functional\IndexByAssociationTest::testManyToOneDQL' => [
-            'fk-actions',
-            'Uses a many-to-many association whose default join columns ORM declares with ON DELETE CASCADE (exchange_bonds_stocks).',
-        ],
-        'Doctrine\Tests\ORM\Functional\IndexByAssociationTest::testManyToOneFinder' => [
-            'fk-actions',
-            'Uses a many-to-many association whose default join columns ORM declares with ON DELETE CASCADE (exchange_bonds_stocks).',
-        ],
-        'Doctrine\Tests\ORM\Functional\IndexByAssociationTest::testManytoManyDQL' => [
-            'fk-actions',
-            'Uses a many-to-many association whose default join columns ORM declares with ON DELETE CASCADE (exchange_bonds_stocks).',
-        ],
-        'Doctrine\Tests\ORM\Functional\JoinedTableCompositeKeyTest::testInsertWithCompositeKey' => [
-            'fk-actions',
-            'Uses JOINED inheritance, for which ORM generates ON DELETE CASCADE from JoinedChildClass to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\JoinedTableCompositeKeyTest::testUpdateWithCompositeKey' => [
-            'fk-actions',
-            'Uses JOINED inheritance, for which ORM generates ON DELETE CASCADE from JoinedChildClass to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\Locking\OptimisticTest::testJoinedChildInsertSetsInitialVersionValue' => [
-            'fk-actions',
-            'Uses a many-to-many association whose default join columns ORM declares with ON DELETE CASCADE (optimistic_joined_child).',
-        ],
-        'Doctrine\Tests\ORM\Functional\Locking\OptimisticTest::testJoinedParentInsertSetsInitialVersionValue' => [
-            'fk-actions',
-            'Uses a many-to-many association whose default join columns ORM declares with ON DELETE CASCADE (optimistic_joined_child).',
-        ],
-        'Doctrine\Tests\ORM\Functional\Locking\OptimisticTest::testLockWorksWithProxy' => [
-            'fk-actions',
-            'Uses a many-to-many association whose default join columns ORM declares with ON DELETE CASCADE (optimistic_joined_child).',
-        ],
-        'Doctrine\Tests\ORM\Functional\Locking\OptimisticTest::testMultipleFlushesDoIncrementalUpdates' => [
-            'fk-actions',
-            'Uses a many-to-many association whose default join columns ORM declares with ON DELETE CASCADE (optimistic_joined_child).',
-        ],
-        'Doctrine\Tests\ORM\Functional\Locking\OptimisticTest::testOptimisticTimestampSetsDefaultValue' => [
-            'fk-actions',
-            'Uses a many-to-many association whose default join columns ORM declares with ON DELETE CASCADE (optimistic_joined_child).',
-        ],
-        'Doctrine\Tests\ORM\Functional\Locking\OptimisticTest::testStandardInsertSetsInitialVersionValue' => [
-            'fk-actions',
-            'Uses a many-to-many association whose default join columns ORM declares with ON DELETE CASCADE (optimistic_joined_child).',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\NativeQueryTest::testAbstractClassInSingleTableInheritanceSchemaWithRSMBuilderThrowsException' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\NativeQueryTest::testBasicNativeQuery' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\NativeQueryTest::testBasicNativeQueryWithMetaResult' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\NativeQueryTest::testConcreteClassInSingleTableInheritanceSchemaWithRSMBuilderIsFine' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\NativeQueryTest::testFluentInterface' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\NativeQueryTest::testGenerateSelectClauseCustomRenames' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\NativeQueryTest::testGenerateSelectClauseIncrement' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\NativeQueryTest::testGenerateSelectClauseNoRenameSingleEntity' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\NativeQueryTest::testGenerateSelectClauseRenameTableAlias' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\NativeQueryTest::testGenerateSelectClauseToString' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\NativeQueryTest::testGenerateSelectClauseWithCustomTypeUsingAddFieldResult' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\NativeQueryTest::testGenerateSelectClauseWithCustomTypeUsingEntityFromClassMetadata' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\NativeQueryTest::testGenerateSelectClauseWithDiscriminatorColumn' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\NativeQueryTest::testJoinedOneToManyNativeQuery' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\NativeQueryTest::testJoinedOneToManyNativeQueryWithRSMBuilder' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\NativeQueryTest::testJoinedOneToOneNativeQuery' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\NativeQueryTest::testJoinedOneToOneNativeQueryWithRSMBuilder' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\NativeQueryTest::testMappingAsDto' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\NativeQueryTest::testNativeQueryWithArrayParameter' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\NativeQueryTest::testRSMBuilderThrowsExceptionOnColumnConflict' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\NativeQueryTest::testUnknownParentAliasThrowsException' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
-        ],
-        'Doctrine\Tests\ORM\Functional\OrderedJoinedTableInheritanceCollectionTest::testOrderdOneToManyCollection' => [
-            'fk-actions',
-            'Uses a many-to-many association whose default join columns ORM declares with ON DELETE CASCADE (OJTICCat).',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\PaginationTest::testCloneQuery' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\PaginationTest::testCountComplexWithOutputWalker' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\PaginationTest::testCountComplexWithoutOutputWalker' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\PaginationTest::testCountQueryStripsParametersInSelect' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\PaginationTest::testCountSimpleWithoutJoin' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\PaginationTest::testCountWithComplexScalarOrderBy' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\PaginationTest::testCountWithCountSubqueryInWhereClauseWithOutputWalker' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\PaginationTest::testCountWithFetchJoin' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\PaginationTest::testCursorPaginatorCannotBuildCursorFromFieldOfJoinedCollection' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\PaginationTest::testCursorPaginatorOrderedByFieldOfJoinedEntity' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\PaginationTest::testCursorPaginatorOrderedByFieldOfJoinedEntityThatIsNotSelected' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\PaginationTest::testCursorPaginatorOrderedByFieldOfJoinedEntityWithNonEntityResults' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\PaginationTest::testCursorPaginatorOrderedByFieldOfNestedJoinedEntity' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\PaginationTest::testCursorPaginatorWithFetchJoinStripsParametersOnlyUsedInSelect' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\PaginationTest::testCustomIdTypeWithoutOutputWalker' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\PaginationTest::testDetectOutputWalker' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\PaginationTest::testDifferentResultLengthsDoNotRequireExtraQueryCacheEntries' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\PaginationTest::testIterateComplexWithOutputWalker' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\PaginationTest::testIterateSimpleWithOutputWalkerWithoutJoinWithComplexOrder' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\PaginationTest::testIterateSimpleWithOutputWalkerWithoutJoinWithComplexOrderAndLimit' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\PaginationTest::testIterateSimpleWithOutputWalkerWithoutJoinWithComplexOrderAndLimitAndOffset' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\PaginationTest::testIterateSimpleWithoutJoin' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\PaginationTest::testIterateSimpleWithoutJoinWithOrder' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\PaginationTest::testIterateSimpleWithoutJoinWithOrderAndLimit' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\PaginationTest::testIterateSimpleWithoutJoinWithOrderAndLimitAndOffset' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\PaginationTest::testIterateWithCountSubqueryInWhereClause' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\PaginationTest::testIterateWithFetchJoin' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\PaginationTest::testIterateWithFetchJoinOneToManyWithOrderByColumnFromBoth' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\PaginationTest::testIterateWithFetchJoinOneToManyWithOrderByColumnFromBothWithLimitWithOutputWalker' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\PaginationTest::testIterateWithFetchJoinOneToManyWithOrderByColumnFromBothWithLimitWithoutOutputWalker' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\PaginationTest::testIterateWithFetchJoinOneToManyWithOrderByColumnFromJoined' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\PaginationTest::testIterateWithFetchJoinOneToManyWithOrderByColumnFromJoinedWithLimitWithOutputWalker' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\PaginationTest::testIterateWithFetchJoinOneToManyWithOrderByColumnFromJoinedWithLimitWithoutOutputWalker' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\PaginationTest::testIterateWithFetchJoinOneToManyWithOrderByColumnFromRoot' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\PaginationTest::testIterateWithFetchJoinOneToManyWithOrderByColumnFromRootWithLimit' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\PaginationTest::testIterateWithFetchJoinOneToManyWithOrderByColumnFromRootWithLimitAndOffset' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\PaginationTest::testIterateWithFetchJoinWithOrder' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\PaginationTest::testIterateWithFetchJoinWithOrderAndLimit' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\PaginationTest::testIterateWithFetchJoinWithOrderAndLimitAndOffset' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\PaginationTest::testIterateWithFetchJoinWithOrderByColumnFromJoined' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\PaginationTest::testIterateWithFetchJoinWithOrderByColumnFromJoinedWithLimit' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\PaginationTest::testIterateWithFetchJoinWithOrderByColumnFromJoinedWithLimitAndOffset' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\PaginationTest::testIterateWithOutputWalkersWithFetchJoinWithComplexOrderByReferencingJoined' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\PaginationTest::testIterateWithOutputWalkersWithFetchJoinWithComplexOrderByReferencingJoinedWithLimit' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\PaginationTest::testIterateWithOutputWalkersWithFetchJoinWithComplexOrderByReferencingJoinedWithLimitAndOffset' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\PaginationTest::testIterateWithOutputWalkersWithFetchJoinWithComplexOrderByReferencingJoinedWithLimitAndOffsetWithInheritanceType' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\PaginationTest::testIterateWithOutputWalkersWithRegularJoinWithComplexOrderByReferencingJoined' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\PaginationTest::testIterateWithOutputWalkersWithRegularJoinWithComplexOrderByReferencingJoinedWithLimit' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\PaginationTest::testIterateWithOutputWalkersWithRegularJoinWithComplexOrderByReferencingJoinedWithLimitAndOffset' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\PaginationTest::testIterateWithRegularJoinWithOrderByColumnFromJoined' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\PaginationTest::testIterateWithRegularJoinWithOrderByColumnFromJoinedWithLimit' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\PaginationTest::testIterateWithRegularJoinWithOrderByColumnFromJoinedWithLimitAndOffset' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\PaginationTest::testJoinedClassTableInheritance' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\PaginationTest::testOffsetPaginatorIsReusableAcrossQueriesAndPages' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\PaginationTest::testOffsetPaginatorRejectsANonWindowPosition' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\PaginationTest::testOffsetPaginatorReturnsFirstPage' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\PaginationTest::testOffsetPaginatorReturnsLastPage' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\PaginationTest::testOffsetPaginatorWithFetchJoin' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\PaginationTest::testOffsetPaginatorWithFromPageNumberAndSize' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\PaginationTest::testPageItemsAreAListEvenForIndexByQueries' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\PaginationTest::testPaginationWithColumnAttributeNameDifference' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\PaginationTest::testPaginationWithSubSelectOrderByExpression' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\PaginationTest::testQueryWalkerIsKept' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\ParserResultSerializationTest::testSerializeParserResultForQueryWithSqlOutputWalker' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\ParserResultSerializationTest::testSerializeParserResultForQueryWithSqlWalker' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\ParserResultSerializationTest::testSymfony44ProvidedData' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\ParserResultSerializationTest::testUnserializeSingleSelectResult' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\QueryDqlFunctionTest::testAggregateAvg' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\QueryDqlFunctionTest::testAggregateCount' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\QueryDqlFunctionTest::testAggregateMax' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\QueryDqlFunctionTest::testAggregateMin' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\QueryDqlFunctionTest::testAggregateSum' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\QueryDqlFunctionTest::testBitAndComparison' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\QueryDqlFunctionTest::testBitOrComparison' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\QueryDqlFunctionTest::testConcatFunction' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\QueryDqlFunctionTest::testDateAdd' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\QueryDqlFunctionTest::testDateAddWithColumnInterval' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\QueryDqlFunctionTest::testDateDiff' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\QueryDqlFunctionTest::testDateSub' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\QueryDqlFunctionTest::testDateSubWithColumnInterval' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\QueryDqlFunctionTest::testFunctionAbs' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\QueryDqlFunctionTest::testFunctionConcat' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\QueryDqlFunctionTest::testFunctionLength' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\QueryDqlFunctionTest::testFunctionLocate' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\QueryDqlFunctionTest::testFunctionLower' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\QueryDqlFunctionTest::testFunctionMod' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\QueryDqlFunctionTest::testFunctionSqrt' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\QueryDqlFunctionTest::testFunctionSubstring' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\QueryDqlFunctionTest::testFunctionTrim' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\QueryDqlFunctionTest::testFunctionUpper' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\QueryDqlFunctionTest::testInArithmeticExpression1' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\QueryDqlFunctionTest::testInArithmeticExpression2' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\QueryDqlFunctionTest::testOperatorAdd' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\QueryDqlFunctionTest::testOperatorDiv' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\QueryDqlFunctionTest::testOperatorMultiply' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\QueryDqlFunctionTest::testOperatorSub' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\ReadonlyPropertiesTest::testEntityWithEagerManyToOne' => [
-            'fk-actions',
-            'Uses a many-to-many association whose default join columns ORM declares with ON DELETE CASCADE (book_author).',
+            'identity',
+            'Uses the IDENTITY generator strategy, which needs lastInsertId().',
         ],
         'Doctrine\Tests\ORM\Functional\ReadonlyPropertiesTest::testEntityWithLazyManyToOne' => [
-            'fk-actions',
-            'Uses a many-to-many association whose default join columns ORM declares with ON DELETE CASCADE (book_author).',
+            'identity',
+            'Uses the IDENTITY generator strategy, which needs lastInsertId().',
         ],
         'Doctrine\Tests\ORM\Functional\ReadonlyPropertiesTest::testEntityWithManyToMany' => [
-            'fk-actions',
-            'Uses a many-to-many association whose default join columns ORM declares with ON DELETE CASCADE (book_author).',
+            'identity',
+            'Uses the IDENTITY generator strategy, which needs lastInsertId().',
         ],
         'Doctrine\Tests\ORM\Functional\ReadonlyPropertiesTest::testSimpleEntity' => [
-            'fk-actions',
-            'Uses a many-to-many association whose default join columns ORM declares with ON DELETE CASCADE (book_author).',
+            'identity',
+            'Uses the IDENTITY generator strategy, which needs lastInsertId().',
         ],
         'Doctrine\Tests\ORM\Functional\ReferenceProxyTest::testAccessMetatadaForProxy' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\ReferenceProxyTest::testCloneProxy' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\ReferenceProxyTest::testCloneProxyWithResetId' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\ReferenceProxyTest::testCommonPersistenceProxy' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\ReferenceProxyTest::testDoNotInitializeProxyOnGettingTheIdentifier' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\ReferenceProxyTest::testDoNotInitializeProxyOnGettingTheIdentifierAndReturnTheRightType' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\ReferenceProxyTest::testDoNotInitializeProxyOnGettingTheIdentifierDDC1625' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\ReferenceProxyTest::testInitializeChangeAndFlushProxy' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\ReferenceProxyTest::testInitializeProxy' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\ReferenceProxyTest::testInitializeProxyOnGettingSomethingOtherThanTheIdentifier' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\ReferenceProxyTest::testLazyLoadsFieldValuesFromDatabase' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\ReferenceProxyTest::testReferenceFind' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\ReferenceProxyTest::testWakeupOnProxy' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\SQLFilterTest::testConfigureFilter' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\SQLFilterTest::testEntityManagerDisableFilter' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\SQLFilterTest::testEntityManagerEnableFilter' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\SQLFilterTest::testEntityManagerEnabledFilters' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\SQLFilterTest::testEntityManagerGetFilter' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\SQLFilterTest::testEntityManagerIsFilterEnabled' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\SQLFilterTest::testJoinSubclassPersisterFilterOnlyOnRootTableWhenFetchingRootEntity' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\SQLFilterTest::testJoinSubclassPersisterFilterOnlyOnRootTableWhenFetchingSubEntity' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\SQLFilterTest::testManyToManyExtraLazyContainsWithFilter' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\SQLFilterTest::testManyToManyExtraLazyContainsWithFilterOnCTI' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\SQLFilterTest::testManyToManyExtraLazyContainsWithFilterOnSTI' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\SQLFilterTest::testManyToManyExtraLazyCountWithFilter' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\SQLFilterTest::testManyToManyExtraLazyCountWithFilterOnCTI' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\SQLFilterTest::testManyToManyExtraLazyCountWithFilterOnSTI' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\SQLFilterTest::testManyToManyExtraLazySliceWithFilter' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\SQLFilterTest::testManyToManyExtraLazySliceWithFilterOnCTI' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\SQLFilterTest::testManyToManyExtraLazySliceWithFilterOnSTI' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\SQLFilterTest::testManyToManyFilter' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\SQLFilterTest::testOneToManyExtraLazyContainsWithFilter' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\SQLFilterTest::testOneToManyExtraLazyContainsWithFilterOnCTI' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\SQLFilterTest::testOneToManyExtraLazyContainsWithFilterOnSTI' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\SQLFilterTest::testOneToManyExtraLazyCountWithFilter' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\SQLFilterTest::testOneToManyExtraLazyCountWithFilterOnCTI' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\SQLFilterTest::testOneToManyExtraLazyCountWithFilterOnSTI' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\SQLFilterTest::testOneToManyExtraLazySliceWithFilter' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\SQLFilterTest::testOneToManyExtraLazySliceWithFilterOnCTI' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\SQLFilterTest::testOneToManyExtraLazySliceWithFilterOnSTI' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\SQLFilterTest::testOneToOneInverseSideWithFilter' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\SQLFilterTest::testQueryCacheDependsOnFilters' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\SQLFilterTest::testQueryGenerationDependsOnFilters' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\SQLFilterTest::testRepositoryFind' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\SQLFilterTest::testRepositoryFindAll' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\SQLFilterTest::testRepositoryFindBy' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\SQLFilterTest::testRepositoryFindByX' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\SQLFilterTest::testRepositoryFindOneBy' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\SQLFilterTest::testRepositoryFindOneByX' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\SQLFilterTest::testRetrieveListAsSingleThrowsException' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\SQLFilterTest::testRetrieveSingleAsListThrowsException' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\SQLFilterTest::testSQLFilterAddConstraint' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\SQLFilterTest::testSQLFilterGetConnection' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\SQLFilterTest::testSQLFilterGetSetParameter' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\SQLFilterTest::testSQLFilterSetArrayParameterInfersType' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\SQLFilterTest::testSQLFilterSetParameterInfersType' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\SQLFilterTest::testSQLFilterToString' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\SQLFilterTest::testSingleTableInheritanceFilterOnlyOnRootTableWhenFetchingRootEntity' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\SQLFilterTest::testSingleTableInheritanceFilterOnlyOnRootTableWhenFetchingSubEntity' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\SQLFilterTest::testToOneFilter' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\SQLFilterTest::testWhereFilter' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\SQLFilterTest::testWhereOrFilter' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\SchemaTool\CompanySchemaTest::testGeneratedSchema' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\SchemaTool\DDC214Test::testCompanyModel' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
-        ],
-        'Doctrine\Tests\ORM\Functional\SecondLevelCacheCompositePrimaryKeyTest::testPutAndLoadCompositPrimaryKeyEntities' => [
-            'fk-actions',
-            'Uses the cache models, whose JOINED inheritance makes ORM generate ON DELETE CASCADE from cache_attraction_contact_info to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\SecondLevelCacheCompositePrimaryKeyTest::testRemoveCompositPrimaryKeyEntities' => [
-            'fk-actions',
-            'Uses the cache models, whose JOINED inheritance makes ORM generate ON DELETE CASCADE from cache_attraction_contact_info to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\SecondLevelCacheCompositePrimaryKeyTest::testUpdateCompositPrimaryKeyEntities' => [
-            'fk-actions',
-            'Uses the cache models, whose JOINED inheritance makes ORM generate ON DELETE CASCADE from cache_attraction_contact_info to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\SecondLevelCacheConcurrentTest::testBasicConcurrentCollectionReadLock' => [
-            'fk-actions',
-            'Uses the cache models, whose JOINED inheritance makes ORM generate ON DELETE CASCADE from cache_attraction_contact_info to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\SecondLevelCacheConcurrentTest::testBasicConcurrentEntityReadLock' => [
-            'fk-actions',
-            'Uses the cache models, whose JOINED inheritance makes ORM generate ON DELETE CASCADE from cache_attraction_contact_info to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\SecondLevelCacheCountQueriesTest::testDelete' => [
-            'fk-actions',
-            'Uses the cache models, whose JOINED inheritance makes ORM generate ON DELETE CASCADE from cache_attraction_contact_info to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\SecondLevelCacheCountQueriesTest::testInsertWithPostInsertIdentifier' => [
-            'fk-actions',
-            'Uses the cache models, whose JOINED inheritance makes ORM generate ON DELETE CASCADE from cache_attraction_contact_info to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\SecondLevelCacheCountQueriesTest::testInsertWithoutPostInsertIdentifier' => [
-            'fk-actions',
-            'Uses the cache models, whose JOINED inheritance makes ORM generate ON DELETE CASCADE from cache_attraction_contact_info to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\SecondLevelCacheCountQueriesTest::testUpdate' => [
-            'fk-actions',
-            'Uses the cache models, whose JOINED inheritance makes ORM generate ON DELETE CASCADE from cache_attraction_contact_info to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\SecondLevelCacheCriteriaTest::testCollectionMatching' => [
-            'fk-actions',
-            'Uses the cache models, whose JOINED inheritance makes ORM generate ON DELETE CASCADE from cache_attraction_contact_info to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\SecondLevelCacheCriteriaTest::testMatchingPut' => [
-            'fk-actions',
-            'Uses the cache models, whose JOINED inheritance makes ORM generate ON DELETE CASCADE from cache_attraction_contact_info to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\SecondLevelCacheCriteriaTest::testRepositoryMatching' => [
-            'fk-actions',
-            'Uses the cache models, whose JOINED inheritance makes ORM generate ON DELETE CASCADE from cache_attraction_contact_info to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\SecondLevelCacheExtraLazyCollectionTest::testCacheCountAfterAddThenFlush' => [
-            'fk-actions',
-            'Uses the cache models, whose JOINED inheritance makes ORM generate ON DELETE CASCADE from cache_attraction_contact_info to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\SecondLevelCacheJoinTableInheritanceTest::testJoinTableCountaisRootClass' => [
-            'fk-actions',
-            'Uses the cache models, whose JOINED inheritance makes ORM generate ON DELETE CASCADE from cache_attraction_contact_info to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\SecondLevelCacheJoinTableInheritanceTest::testOneToManyRelationJoinTable' => [
-            'fk-actions',
-            'Uses the cache models, whose JOINED inheritance makes ORM generate ON DELETE CASCADE from cache_attraction_contact_info to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\SecondLevelCacheJoinTableInheritanceTest::testPutAndLoadJoinTableEntities' => [
-            'fk-actions',
-            'Uses the cache models, whose JOINED inheritance makes ORM generate ON DELETE CASCADE from cache_attraction_contact_info to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\SecondLevelCacheJoinTableInheritanceTest::testPutOnPersistJoinTableInheritance' => [
-            'fk-actions',
-            'Uses the cache models, whose JOINED inheritance makes ORM generate ON DELETE CASCADE from cache_attraction_contact_info to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\SecondLevelCacheJoinTableInheritanceTest::testQueryCacheFindAllJoinTableEntities' => [
-            'fk-actions',
-            'Uses the cache models, whose JOINED inheritance makes ORM generate ON DELETE CASCADE from cache_attraction_contact_info to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\SecondLevelCacheJoinTableInheritanceTest::testQueryCacheShouldBeEvictedOnTimestampUpdate' => [
-            'fk-actions',
-            'Uses the cache models, whose JOINED inheritance makes ORM generate ON DELETE CASCADE from cache_attraction_contact_info to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\SecondLevelCacheJoinTableInheritanceTest::testUseSameRegion' => [
-            'fk-actions',
-            'Uses the cache models, whose JOINED inheritance makes ORM generate ON DELETE CASCADE from cache_attraction_contact_info to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\SecondLevelCacheManyToManyTest::testManyToManyWithEmptyRelation' => [
-            'fk-actions',
-            'Uses the cache models, whose JOINED inheritance makes ORM generate ON DELETE CASCADE from cache_attraction_contact_info to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\SecondLevelCacheManyToManyTest::testPutAndLoadManyToManyRelation' => [
-            'fk-actions',
-            'Uses the cache models, whose JOINED inheritance makes ORM generate ON DELETE CASCADE from cache_attraction_contact_info to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\SecondLevelCacheManyToManyTest::testReadOnlyCollection' => [
-            'fk-actions',
-            'Uses the cache models, whose JOINED inheritance makes ORM generate ON DELETE CASCADE from cache_attraction_contact_info to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\SecondLevelCacheManyToManyTest::testShouldPutManyToManyCollectionOwningSideOnPersist' => [
-            'fk-actions',
-            'Uses the cache models, whose JOINED inheritance makes ORM generate ON DELETE CASCADE from cache_attraction_contact_info to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\SecondLevelCacheManyToManyTest::testStoreManyToManyAssociationWhitCascade' => [
-            'fk-actions',
-            'Uses the cache models, whose JOINED inheritance makes ORM generate ON DELETE CASCADE from cache_attraction_contact_info to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\SecondLevelCacheManyToOneTest::testInverseSidePutShouldEvictCollection' => [
-            'fk-actions',
-            'Uses the cache models, whose JOINED inheritance makes ORM generate ON DELETE CASCADE from cache_attraction_contact_info to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\SecondLevelCacheManyToOneTest::testPutAndLoadManyToOneRelation' => [
-            'fk-actions',
-            'Uses the cache models, whose JOINED inheritance makes ORM generate ON DELETE CASCADE from cache_attraction_contact_info to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\SecondLevelCacheManyToOneTest::testPutAndLoadNonCacheableCompositeManyToOne' => [
-            'fk-actions',
-            'Uses the cache models, whose JOINED inheritance makes ORM generate ON DELETE CASCADE from cache_attraction_contact_info to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\SecondLevelCacheManyToOneTest::testPutAndLoadNonCacheableManyToOne' => [
-            'fk-actions',
-            'Uses the cache models, whose JOINED inheritance makes ORM generate ON DELETE CASCADE from cache_attraction_contact_info to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\SecondLevelCacheManyToOneTest::testPutOnPersist' => [
-            'fk-actions',
-            'Uses the cache models, whose JOINED inheritance makes ORM generate ON DELETE CASCADE from cache_attraction_contact_info to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\SecondLevelCacheManyToOneTest::testShouldNotReloadWhenAssociationIsMissing' => [
-            'fk-actions',
-            'Uses the cache models, whose JOINED inheritance makes ORM generate ON DELETE CASCADE from cache_attraction_contact_info to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\SecondLevelCacheOneToManyTest::testCacheInitializeCollectionWithNewObjects' => [
-            'fk-actions',
-            'Uses the cache models, whose JOINED inheritance makes ORM generate ON DELETE CASCADE from cache_attraction_contact_info to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\SecondLevelCacheOneToManyTest::testLoadOneToManyCollectionFromDatabaseWhenEntityMissing' => [
-            'fk-actions',
-            'Uses the cache models, whose JOINED inheritance makes ORM generate ON DELETE CASCADE from cache_attraction_contact_info to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\SecondLevelCacheOneToManyTest::testOneToManyCount' => [
-            'fk-actions',
-            'Uses the cache models, whose JOINED inheritance makes ORM generate ON DELETE CASCADE from cache_attraction_contact_info to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\SecondLevelCacheOneToManyTest::testOneToManyRemove' => [
-            'fk-actions',
-            'Uses the cache models, whose JOINED inheritance makes ORM generate ON DELETE CASCADE from cache_attraction_contact_info to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\SecondLevelCacheOneToManyTest::testOneToManyWithEmptyRelation' => [
-            'fk-actions',
-            'Uses the cache models, whose JOINED inheritance makes ORM generate ON DELETE CASCADE from cache_attraction_contact_info to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\SecondLevelCacheOneToManyTest::testPutAndLoadNonCacheableOneToMany' => [
-            'fk-actions',
-            'Uses the cache models, whose JOINED inheritance makes ORM generate ON DELETE CASCADE from cache_attraction_contact_info to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\SecondLevelCacheOneToManyTest::testPutAndLoadOneToManyRelation' => [
-            'fk-actions',
-            'Uses the cache models, whose JOINED inheritance makes ORM generate ON DELETE CASCADE from cache_attraction_contact_info to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\SecondLevelCacheOneToManyTest::testShoudNotPutOneToManyRelationOnPersist' => [
-            'fk-actions',
-            'Uses the cache models, whose JOINED inheritance makes ORM generate ON DELETE CASCADE from cache_attraction_contact_info to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\SecondLevelCacheOneToManyTest::testShouldPutCollectionInverseSideOnPersist' => [
-            'fk-actions',
-            'Uses the cache models, whose JOINED inheritance makes ORM generate ON DELETE CASCADE from cache_attraction_contact_info to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\SecondLevelCacheOneToOneTest::testInverseSidePutAndLoadOneToOneBidirectionalRelation' => [
-            'fk-actions',
-            'Uses the cache models, whose JOINED inheritance makes ORM generate ON DELETE CASCADE from cache_attraction_contact_info to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\SecondLevelCacheOneToOneTest::testPutAndLoadNonCacheableOneToOne' => [
-            'fk-actions',
-            'Uses the cache models, whose JOINED inheritance makes ORM generate ON DELETE CASCADE from cache_attraction_contact_info to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\SecondLevelCacheOneToOneTest::testPutAndLoadOneToOneBidirectionalRelation' => [
-            'fk-actions',
-            'Uses the cache models, whose JOINED inheritance makes ORM generate ON DELETE CASCADE from cache_attraction_contact_info to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\SecondLevelCacheOneToOneTest::testPutAndLoadOneToOneUnidirectionalRelation' => [
-            'fk-actions',
-            'Uses the cache models, whose JOINED inheritance makes ORM generate ON DELETE CASCADE from cache_attraction_contact_info to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\SecondLevelCacheOneToOneTest::testPutOneToOneOnBidirectionalPersist' => [
-            'fk-actions',
-            'Uses the cache models, whose JOINED inheritance makes ORM generate ON DELETE CASCADE from cache_attraction_contact_info to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\SecondLevelCacheOneToOneTest::testPutOneToOneOnUnidirectionalPersist' => [
-            'fk-actions',
-            'Uses the cache models, whose JOINED inheritance makes ORM generate ON DELETE CASCADE from cache_attraction_contact_info to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\SecondLevelCacheQueryCacheTest::testBasicNativeQueryCache' => [
-            'fk-actions',
-            'Uses the cache models, whose JOINED inheritance makes ORM generate ON DELETE CASCADE from cache_attraction_contact_info to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\SecondLevelCacheQueryCacheTest::testBasicQueryCache' => [
-            'fk-actions',
-            'Uses the cache models, whose JOINED inheritance makes ORM generate ON DELETE CASCADE from cache_attraction_contact_info to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\SecondLevelCacheQueryCacheTest::testBasicQueryCachePutEntityCache' => [
-            'fk-actions',
-            'Uses the cache models, whose JOINED inheritance makes ORM generate ON DELETE CASCADE from cache_attraction_contact_info to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\SecondLevelCacheQueryCacheTest::testBasicQueryFetchJoinsManyToOne' => [
-            'fk-actions',
-            'Uses the cache models, whose JOINED inheritance makes ORM generate ON DELETE CASCADE from cache_attraction_contact_info to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\SecondLevelCacheQueryCacheTest::testBasicQueryFetchJoinsOneToMany' => [
-            'fk-actions',
-            'Uses the cache models, whose JOINED inheritance makes ORM generate ON DELETE CASCADE from cache_attraction_contact_info to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\SecondLevelCacheQueryCacheTest::testBasicQueryParams' => [
-            'fk-actions',
-            'Uses the cache models, whose JOINED inheritance makes ORM generate ON DELETE CASCADE from cache_attraction_contact_info to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\SecondLevelCacheQueryCacheTest::testCacheableForcePartialLoadHintQueryException' => [
-            'fk-actions',
-            'Uses the cache models, whose JOINED inheritance makes ORM generate ON DELETE CASCADE from cache_attraction_contact_info to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\SecondLevelCacheQueryCacheTest::testCacheablePartialQueryException' => [
-            'fk-actions',
-            'Uses the cache models, whose JOINED inheritance makes ORM generate ON DELETE CASCADE from cache_attraction_contact_info to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\SecondLevelCacheQueryCacheTest::testHintClearEntityRegionDeleteStatement' => [
-            'fk-actions',
-            'Uses the cache models, whose JOINED inheritance makes ORM generate ON DELETE CASCADE from cache_attraction_contact_info to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\SecondLevelCacheQueryCacheTest::testHintClearEntityRegionUpdateStatement' => [
-            'fk-actions',
-            'Uses the cache models, whose JOINED inheritance makes ORM generate ON DELETE CASCADE from cache_attraction_contact_info to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\SecondLevelCacheQueryCacheTest::testLoadFromDatabaseWhenEntityMissing' => [
-            'fk-actions',
-            'Uses the cache models, whose JOINED inheritance makes ORM generate ON DELETE CASCADE from cache_attraction_contact_info to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\SecondLevelCacheQueryCacheTest::testMultipleNestedDQLAliases' => [
-            'fk-actions',
-            'Uses the cache models, whose JOINED inheritance makes ORM generate ON DELETE CASCADE from cache_attraction_contact_info to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\SecondLevelCacheQueryCacheTest::testNonCacheableQueryDeleteStatementException' => [
-            'fk-actions',
-            'Uses the cache models, whose JOINED inheritance makes ORM generate ON DELETE CASCADE from cache_attraction_contact_info to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\SecondLevelCacheQueryCacheTest::testNonCacheableQueryUpdateStatementException' => [
-            'fk-actions',
-            'Uses the cache models, whose JOINED inheritance makes ORM generate ON DELETE CASCADE from cache_attraction_contact_info to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\SecondLevelCacheQueryCacheTest::testQueryCacheLifetime' => [
-            'fk-actions',
-            'Uses the cache models, whose JOINED inheritance makes ORM generate ON DELETE CASCADE from cache_attraction_contact_info to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\SecondLevelCacheQueryCacheTest::testQueryCacheModeGet' => [
-            'fk-actions',
-            'Uses the cache models, whose JOINED inheritance makes ORM generate ON DELETE CASCADE from cache_attraction_contact_info to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\SecondLevelCacheQueryCacheTest::testQueryCacheModePut' => [
-            'fk-actions',
-            'Uses the cache models, whose JOINED inheritance makes ORM generate ON DELETE CASCADE from cache_attraction_contact_info to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\SecondLevelCacheQueryCacheTest::testQueryCacheModeRefresh' => [
-            'fk-actions',
-            'Uses the cache models, whose JOINED inheritance makes ORM generate ON DELETE CASCADE from cache_attraction_contact_info to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\SecondLevelCacheQueryCacheTest::testQueryCacheRegion' => [
-            'fk-actions',
-            'Uses the cache models, whose JOINED inheritance makes ORM generate ON DELETE CASCADE from cache_attraction_contact_info to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\SecondLevelCacheQueryCacheTest::testQueryCacheShouldBeEvictedOnTimestampUpdate' => [
-            'fk-actions',
-            'Uses the cache models, whose JOINED inheritance makes ORM generate ON DELETE CASCADE from cache_attraction_contact_info to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\SecondLevelCacheQueryCacheTest::testQueryDependsOnFirstAndMaxResultResult' => [
-            'fk-actions',
-            'Uses the cache models, whose JOINED inheritance makes ORM generate ON DELETE CASCADE from cache_attraction_contact_info to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\SecondLevelCacheQueryCacheTest::testReloadQueryIfToManyAssociationItemIsNotFound' => [
-            'fk-actions',
-            'Uses the cache models, whose JOINED inheritance makes ORM generate ON DELETE CASCADE from cache_attraction_contact_info to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\SecondLevelCacheQueryCacheTest::testReloadQueryIfToOneIsNotFound' => [
-            'fk-actions',
-            'Uses the cache models, whose JOINED inheritance makes ORM generate ON DELETE CASCADE from cache_attraction_contact_info to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\SecondLevelCacheQueryCacheTest::testResolveAssociationCacheEntry' => [
-            'fk-actions',
-            'Uses the cache models, whose JOINED inheritance makes ORM generate ON DELETE CASCADE from cache_attraction_contact_info to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\SecondLevelCacheQueryCacheTest::testResolveToManyAssociationCacheEntry' => [
-            'fk-actions',
-            'Uses the cache models, whose JOINED inheritance makes ORM generate ON DELETE CASCADE from cache_attraction_contact_info to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\SecondLevelCacheQueryCacheTest::testResolveToOneAssociationCacheEntry' => [
-            'fk-actions',
-            'Uses the cache models, whose JOINED inheritance makes ORM generate ON DELETE CASCADE from cache_attraction_contact_info to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\SecondLevelCacheRepositoryTest::testRepositoryCacheFind' => [
-            'fk-actions',
-            'Uses the cache models, whose JOINED inheritance makes ORM generate ON DELETE CASCADE from cache_attraction_contact_info to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\SecondLevelCacheRepositoryTest::testRepositoryCacheFindAll' => [
-            'fk-actions',
-            'Uses the cache models, whose JOINED inheritance makes ORM generate ON DELETE CASCADE from cache_attraction_contact_info to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\SecondLevelCacheRepositoryTest::testRepositoryCacheFindAllInvalidation' => [
-            'fk-actions',
-            'Uses the cache models, whose JOINED inheritance makes ORM generate ON DELETE CASCADE from cache_attraction_contact_info to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\SecondLevelCacheRepositoryTest::testRepositoryCacheFindAllToOneAssociation' => [
-            'fk-actions',
-            'Uses the cache models, whose JOINED inheritance makes ORM generate ON DELETE CASCADE from cache_attraction_contact_info to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\SecondLevelCacheRepositoryTest::testRepositoryCacheFindBy' => [
-            'fk-actions',
-            'Uses the cache models, whose JOINED inheritance makes ORM generate ON DELETE CASCADE from cache_attraction_contact_info to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\SecondLevelCacheRepositoryTest::testRepositoryCacheFindOneBy' => [
-            'fk-actions',
-            'Uses the cache models, whose JOINED inheritance makes ORM generate ON DELETE CASCADE from cache_attraction_contact_info to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\SecondLevelCacheSingleTableInheritanceTest::testCountaisRootClass' => [
-            'fk-actions',
-            'Uses the cache models, whose JOINED inheritance makes ORM generate ON DELETE CASCADE from cache_attraction_contact_info to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\SecondLevelCacheSingleTableInheritanceTest::testOneToManyRelationSingleTable' => [
-            'fk-actions',
-            'Uses the cache models, whose JOINED inheritance makes ORM generate ON DELETE CASCADE from cache_attraction_contact_info to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\SecondLevelCacheSingleTableInheritanceTest::testPutAndLoadEntities' => [
-            'fk-actions',
-            'Uses the cache models, whose JOINED inheritance makes ORM generate ON DELETE CASCADE from cache_attraction_contact_info to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\SecondLevelCacheSingleTableInheritanceTest::testPutOnPersistSingleTableInheritance' => [
-            'fk-actions',
-            'Uses the cache models, whose JOINED inheritance makes ORM generate ON DELETE CASCADE from cache_attraction_contact_info to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\SecondLevelCacheSingleTableInheritanceTest::testQueryCacheFindAll' => [
-            'fk-actions',
-            'Uses the cache models, whose JOINED inheritance makes ORM generate ON DELETE CASCADE from cache_attraction_contact_info to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\SecondLevelCacheSingleTableInheritanceTest::testQueryCacheShouldBeEvictedOnTimestampUpdate' => [
-            'fk-actions',
-            'Uses the cache models, whose JOINED inheritance makes ORM generate ON DELETE CASCADE from cache_attraction_contact_info to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\SecondLevelCacheSingleTableInheritanceTest::testShouldNotPutOneToManyRelationOnPersist' => [
-            'fk-actions',
-            'Uses the cache models, whose JOINED inheritance makes ORM generate ON DELETE CASCADE from cache_attraction_contact_info to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\SecondLevelCacheSingleTableInheritanceTest::testUseSameRegion' => [
-            'fk-actions',
-            'Uses the cache models, whose JOINED inheritance makes ORM generate ON DELETE CASCADE from cache_attraction_contact_info to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\SecondLevelCacheTest::testCachedNewEntityExists' => [
-            'fk-actions',
-            'Uses the cache models, whose JOINED inheritance makes ORM generate ON DELETE CASCADE from cache_attraction_contact_info to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\SecondLevelCacheTest::testPostFlushFailure' => [
-            'fk-actions',
-            'Uses the cache models, whose JOINED inheritance makes ORM generate ON DELETE CASCADE from cache_attraction_contact_info to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\SecondLevelCacheTest::testPostRemoveFailure' => [
-            'fk-actions',
-            'Uses the cache models, whose JOINED inheritance makes ORM generate ON DELETE CASCADE from cache_attraction_contact_info to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\SecondLevelCacheTest::testPostUpdateFailure' => [
-            'fk-actions',
-            'Uses the cache models, whose JOINED inheritance makes ORM generate ON DELETE CASCADE from cache_attraction_contact_info to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\SecondLevelCacheTest::testPutAndLoadEntities' => [
-            'fk-actions',
-            'Uses the cache models, whose JOINED inheritance makes ORM generate ON DELETE CASCADE from cache_attraction_contact_info to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\SecondLevelCacheTest::testPutOnPersist' => [
-            'fk-actions',
-            'Uses the cache models, whose JOINED inheritance makes ORM generate ON DELETE CASCADE from cache_attraction_contact_info to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\SecondLevelCacheTest::testRemoveEntities' => [
-            'fk-actions',
-            'Uses the cache models, whose JOINED inheritance makes ORM generate ON DELETE CASCADE from cache_attraction_contact_info to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\SecondLevelCacheTest::testUpdateEntities' => [
-            'fk-actions',
-            'Uses the cache models, whose JOINED inheritance makes ORM generate ON DELETE CASCADE from cache_attraction_contact_info to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\SingleTableCompositeKeyTest::testInsertWithCompositeKey' => [
-            'fk-actions',
-            'Uses JOINED inheritance, for which ORM generates ON DELETE CASCADE from JoinedChildClass to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\SingleTableCompositeKeyTest::testUpdateWithCompositeKey' => [
-            'fk-actions',
-            'Uses JOINED inheritance, for which ORM generates ON DELETE CASCADE from JoinedChildClass to its root table.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\SingleTableInheritanceTest::testChildClassLifecycleRemove' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\SingleTableInheritanceTest::testChildClassLifecycleUpdate' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\SingleTableInheritanceTest::testDeleteByBaseClassCondition' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\SingleTableInheritanceTest::testDeleteByChildClassCondition' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\SingleTableInheritanceTest::testDeleteJoinTableRecords' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\SingleTableInheritanceTest::testEagerLoadInheritanceHierarchy' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\SingleTableInheritanceTest::testFindAllForAbstractBaseClass' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\SingleTableInheritanceTest::testFindAllForChildClass' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\SingleTableInheritanceTest::testFindByAssociation' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\SingleTableInheritanceTest::testFindForAbstractBaseClass' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\SingleTableInheritanceTest::testGetReferenceEntityWithSubclasses' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\SingleTableInheritanceTest::testInheritanceMatching' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\SingleTableInheritanceTest::testMatchingNonObjectOnAssocationThrowsException' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\SingleTableInheritanceTest::testPersistChildOfBaseClass' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\SingleTableInheritanceTest::testPersistDeepChildOfBaseClass' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\SingleTableInheritanceTest::testQueryBaseClassWithJoin' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\SingleTableInheritanceTest::testQueryChildClassWithCondition' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\SingleTableInheritanceTest::testQueryForAbstractBaseClass' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\SingleTableInheritanceTest::testQueryForChildClass' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\SingleTableInheritanceTest::testQueryScalarWithDiscriminatorValue' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\SingleTableInheritanceTest::testUpdateBaseClassWithCondition' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\SingleTableInheritanceTest::testUpdateChildClassWithCondition' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\Ticket\DDC1041Test::testGrabWrongSubtypeReturnsNull' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
-        ],
-        'Doctrine\Tests\ORM\Functional\Ticket\DDC1163Test::testIssue' => [
-            'fk-actions',
-            'Uses a many-to-many association whose default join columns ORM declares with ON DELETE CASCADE (DDC1163SpecialProduct).',
-        ],
-        'Doctrine\Tests\ORM\Functional\Ticket\DDC144Test::testIssue' => [
-            'fk-actions',
-            'Uses a many-to-many association whose default join columns ORM declares with ON DELETE CASCADE (ddc144_operands).',
-        ],
-        'Doctrine\Tests\ORM\Functional\Ticket\DDC1454Test::testFailingCase' => [
-            'fk-actions',
-            'Uses a many-to-many association whose default join columns ORM declares with ON DELETE CASCADE (DDC1454Picture).',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\Ticket\DDC163Test::testQueryWithOrConditionUsingTwoRelationOnSameEntity' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
-        ],
-        'Doctrine\Tests\ORM\Functional\Ticket\DDC1654Test::testManyToManyClearCollectionOrphanRemoval' => [
-            'fk-actions',
-            'Uses a many-to-many association whose default join columns ORM declares with ON DELETE CASCADE (ddc1654post_ddc1654comment).',
-        ],
-        'Doctrine\Tests\ORM\Functional\Ticket\DDC1654Test::testManyToManyClearCollectionReAddOrphanRemoval' => [
-            'fk-actions',
-            'Uses a many-to-many association whose default join columns ORM declares with ON DELETE CASCADE (ddc1654post_ddc1654comment).',
-        ],
-        'Doctrine\Tests\ORM\Functional\Ticket\DDC1654Test::testManyToManyRemoveElementFromCollectionOrphanRemoval' => [
-            'fk-actions',
-            'Uses a many-to-many association whose default join columns ORM declares with ON DELETE CASCADE (ddc1654post_ddc1654comment).',
-        ],
-        'Doctrine\Tests\ORM\Functional\Ticket\DDC1654Test::testManyToManyRemoveElementFromReAddToCollectionOrphanRemoval' => [
-            'fk-actions',
-            'Uses a many-to-many association whose default join columns ORM declares with ON DELETE CASCADE (ddc1654post_ddc1654comment).',
-        ],
-        'Doctrine\Tests\ORM\Functional\Ticket\DDC1654Test::testManyToManyRemoveFromCollectionOrphanRemoval' => [
-            'fk-actions',
-            'Uses a many-to-many association whose default join columns ORM declares with ON DELETE CASCADE (ddc1654post_ddc1654comment).',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\Ticket\DDC168Test::testJoinedSubclassPersisterRequiresSpecificOrderOfMetadataReflFieldsArray' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
-        ],
-        'Doctrine\Tests\ORM\Functional\Ticket\DDC1787Test::testIssue' => [
-            'fk-actions',
-            'Uses a many-to-many association whose default join columns ORM declares with ON DELETE CASCADE (DDC1787Bar).',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\Ticket\DDC1995Test::testIssue' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\Ticket\DDC1995Test::testQueryCache' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
-        ],
-        'Doctrine\Tests\ORM\Functional\Ticket\DDC2012Test::testIssue' => [
-            'fk-actions',
-            'Uses a many-to-many association whose default join columns ORM declares with ON DELETE CASCADE (ddc2010_item_person).',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\Ticket\DDC2090Test::testIssue' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
-        ],
-        'Doctrine\Tests\ORM\Functional\Ticket\DDC2346Test::testIssue' => [
-            'fk-actions',
-            'Uses a many-to-many association whose default join columns ORM declares with ON DELETE CASCADE (DDC2346Baz).',
-        ],
-        'Doctrine\Tests\ORM\Functional\Ticket\DDC2575Test::testHydrationIssue' => [
-            'fk-actions',
-            'Uses a many-to-many association whose default join columns ORM declares with ON DELETE CASCADE (DDC2575A).',
-        ],
-        'Doctrine\Tests\ORM\Functional\Ticket\DDC258Test::testIssue' => [
-            'fk-actions',
-            'Uses a many-to-many association whose default join columns ORM declares with ON DELETE CASCADE (DDC258Class1).',
-        ],
-        'Doctrine\Tests\ORM\Functional\Ticket\DDC2602Test::testPostLoadListenerShouldBeAbleToRunQueries' => [
-            'fk-actions',
-            'Uses a many-to-many association whose default join columns ORM declares with ON DELETE CASCADE (DDC2602BiographyFieldChoice).',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\Ticket\DDC2775Test::testIssueCascadeRemove' => [
-            'fk-actions',
-            'Uses a many-to-many association whose default join columns ORM declares with ON DELETE CASCADE (ddc2775_admin_role).',
-        ],
-        'Doctrine\Tests\ORM\Functional\Ticket\DDC279Test::testDDC279' => [
-            'fk-actions',
-            'Uses a many-to-many association whose default join columns ORM declares with ON DELETE CASCADE (DDC279EntityX).',
-        ],
-        'Doctrine\Tests\ORM\Functional\Ticket\DDC2943Test::testIssue' => [
-            'fk-actions',
-            'Uses the cache models, whose JOINED inheritance makes ORM generate ON DELETE CASCADE from cache_attraction_contact_info to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\Ticket\DDC2943Test::testIssueNonFetchJoin' => [
-            'fk-actions',
-            'Uses the cache models, whose JOINED inheritance makes ORM generate ON DELETE CASCADE from cache_attraction_contact_info to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\Ticket\DDC3170Test::testIssue' => [
-            'fk-actions',
-            'Uses a many-to-many association whose default join columns ORM declares with ON DELETE CASCADE (DDC3170ProductJoined).',
-        ],
-        'Doctrine\Tests\ORM\Functional\Ticket\DDC3223Test::testIssueGetId' => [
-            'fk-actions',
-            'Uses a many-to-many association whose default join columns ORM declares with ON DELETE CASCADE (ddc3223_journalist).',
+            'early-fk',
+            'Its flush deletes or updates a referenced row after removing the references in the same transaction.',
         ],
         'Doctrine\Tests\ORM\Functional\Ticket\DDC331Test::testSelectFieldOnRootEntity' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\Ticket\DDC3597Test::testSaveImageEntity' => [
-            'fk-actions',
-            'Uses a many-to-many association whose default join columns ORM declares with ON DELETE CASCADE (DDC3597Media).',
-        ],
-        'Doctrine\Tests\ORM\Functional\Ticket\DDC3644Test::testIssueWithJoinedEntity' => [
-            'fk-actions',
-            'Uses JOINED inheritance, for which ORM generates ON DELETE CASCADE from DDC3644Pet to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\Ticket\DDC3644Test::testIssueWithRegularEntity' => [
-            'fk-actions',
-            'Uses JOINED inheritance, for which ORM generates ON DELETE CASCADE from DDC3644Pet to its root table.',
+            'identity',
+            'Uses the IDENTITY generator strategy, which needs lastInsertId().',
         ],
         'Doctrine\Tests\ORM\Functional\Ticket\DDC3719Test::testCriteriaOnNotOwningSide' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
-        ],
-        'Doctrine\Tests\ORM\Functional\Ticket\DDC3967Test::testIdentifierCachedWithProperType' => [
-            'fk-actions',
-            'Uses the cache models, whose JOINED inheritance makes ORM generate ON DELETE CASCADE from cache_attraction_contact_info to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\Ticket\DDC4003Test::testReadsThroughRepositorySameDataThatItWroteInCache' => [
-            'fk-actions',
-            'Uses the cache models, whose JOINED inheritance makes ORM generate ON DELETE CASCADE from cache_attraction_contact_info to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\Ticket\DDC422Test::testIssue' => [
-            'fk-actions',
-            'Uses a many-to-many association whose default join columns ORM declares with ON DELETE CASCADE (DDC422Customer).',
-        ],
-        'Doctrine\Tests\ORM\Functional\Ticket\DDC440Test::testOriginalEntityDataEmptyWhenProxyLoadedFromTwoAssociations' => [
-            'fk-actions',
-            'Uses a many-to-many association whose default join columns ORM declares with ON DELETE CASCADE (client).',
-        ],
-        'Doctrine\Tests\ORM\Functional\Ticket\DDC448Test::testIssue' => [
-            'fk-actions',
-            'Uses a many-to-many association whose default join columns ORM declares with ON DELETE CASCADE (DDC448MainTable).',
-        ],
-        'Doctrine\Tests\ORM\Functional\Ticket\DDC493Test::testIssue' => [
-            'fk-actions',
-            'Uses a many-to-many association whose default join columns ORM declares with ON DELETE CASCADE (DDC493Distributor).',
-        ],
-        'Doctrine\Tests\ORM\Functional\Ticket\DDC512Test::testIssue' => [
-            'fk-actions',
-            'Uses a many-to-many association whose default join columns ORM declares with ON DELETE CASCADE (DDC512OfferItem).',
-        ],
-        'Doctrine\Tests\ORM\Functional\Ticket\DDC513Test::testIssue' => [
-            'fk-actions',
-            'Uses a many-to-many association whose default join columns ORM declares with ON DELETE CASCADE (DDC513OfferItem).',
-        ],
-        'Doctrine\Tests\ORM\Functional\Ticket\DDC6303Test::testEmptyValuesInJoinedInheritance' => [
-            'fk-actions',
-            'Uses a many-to-many association whose default join columns ORM declares with ON DELETE CASCADE (DDC6303ChildA).',
-        ],
-        'Doctrine\Tests\ORM\Functional\Ticket\DDC6303Test::testMixedTypeHydratedCorrectlyInJoinedInheritance' => [
-            'fk-actions',
-            'Uses a many-to-many association whose default join columns ORM declares with ON DELETE CASCADE (DDC6303ChildA).',
-        ],
-        'Doctrine\Tests\ORM\Functional\Ticket\DDC6558Test::testEmployeeIsPopulated' => [
-            'fk-actions',
-            'Uses a many-to-many association whose default join columns ORM declares with ON DELETE CASCADE (DDC6558Employee).',
-        ],
-        'Doctrine\Tests\ORM\Functional\Ticket\DDC832Test::testQuotedTableBasicRemove' => [
-            'fk-actions',
-            'Uses a many-to-many association whose default join columns ORM declares with ON DELETE CASCADE (TREE_INDEX).',
-        ],
-        'Doctrine\Tests\ORM\Functional\Ticket\DDC832Test::testQuotedTableBasicUpdate' => [
-            'fk-actions',
-            'Uses a many-to-many association whose default join columns ORM declares with ON DELETE CASCADE (TREE_INDEX).',
-        ],
-        'Doctrine\Tests\ORM\Functional\Ticket\DDC832Test::testQuotedTableJoinedChildRemove' => [
-            'fk-actions',
-            'Uses a many-to-many association whose default join columns ORM declares with ON DELETE CASCADE (TREE_INDEX).',
-        ],
-        'Doctrine\Tests\ORM\Functional\Ticket\DDC832Test::testQuotedTableJoinedChildUpdate' => [
-            'fk-actions',
-            'Uses a many-to-many association whose default join columns ORM declares with ON DELETE CASCADE (TREE_INDEX).',
-        ],
-        'Doctrine\Tests\ORM\Functional\Ticket\DDC832Test::testQuotedTableJoinedRemove' => [
-            'fk-actions',
-            'Uses a many-to-many association whose default join columns ORM declares with ON DELETE CASCADE (TREE_INDEX).',
-        ],
-        'Doctrine\Tests\ORM\Functional\Ticket\DDC832Test::testQuotedTableJoinedUpdate' => [
-            'fk-actions',
-            'Uses a many-to-many association whose default join columns ORM declares with ON DELETE CASCADE (TREE_INDEX).',
-        ],
-        'Doctrine\Tests\ORM\Functional\Ticket\DDC837Test::testIssue' => [
-            'fk-actions',
-            'Uses a many-to-many association whose default join columns ORM declares with ON DELETE CASCADE (DDC837Class1).',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\Ticket\DDC933Test::testLockCTIClass' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
-        ],
-        'Doctrine\Tests\ORM\Functional\Ticket\DDC960Test::testUpdateRootVersion' => [
-            'fk-actions',
-            'Uses a many-to-many association whose default join columns ORM declares with ON DELETE CASCADE (DDC960Child).',
-        ],
-        'Doctrine\Tests\ORM\Functional\Ticket\DDC992Test::testIssue' => [
-            'fk-actions',
-            'Uses a many-to-many association whose default join columns ORM declares with ON DELETE CASCADE (DDC992Child).',
-        ],
-        'Doctrine\Tests\ORM\Functional\Ticket\DDC992Test::testOneToManyChild' => [
-            'fk-actions',
-            'Uses a many-to-many association whose default join columns ORM declares with ON DELETE CASCADE (DDC992Child).',
-        ],
-        'Doctrine\Tests\ORM\Functional\Ticket\GH10288Test::testEnumDiscriminatorWithCustomEnumType' => [
-            'fk-actions',
-            'Uses a many-to-many association whose default join columns ORM declares with ON DELETE CASCADE (GH10288BossWithEnumType).',
-        ],
-        'Doctrine\Tests\ORM\Functional\Ticket\GH10288Test::testEnumDiscriminatorWithEnumType' => [
-            'fk-actions',
-            'Uses a many-to-many association whose default join columns ORM declares with ON DELETE CASCADE (GH10288BossWithEnumType).',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\Ticket\GH10531Test::testDeletes' => [
-            'fk-actions',
-            'Uses a many-to-many association whose default join columns ORM declares with ON DELETE CASCADE (gh10531_b).',
-        ],
-        'Doctrine\Tests\ORM\Functional\Ticket\GH10531Test::testInserts' => [
-            'fk-actions',
-            'Uses a many-to-many association whose default join columns ORM declares with ON DELETE CASCADE (gh10531_b).',
+            'early-fk',
+            'Its flush deletes or updates a referenced row after removing the references in the same transaction.',
         ],
         'Doctrine\Tests\ORM\Functional\Ticket\GH10532Test::testDeletes' => [
-            'fk-actions',
-            'Uses a many-to-many association whose default join columns ORM declares with ON DELETE CASCADE (gh10532_b).',
-        ],
-        'Doctrine\Tests\ORM\Functional\Ticket\GH10532Test::testInserts' => [
-            'fk-actions',
-            'Uses a many-to-many association whose default join columns ORM declares with ON DELETE CASCADE (gh10532_b).',
-        ],
-        'Doctrine\Tests\ORM\Functional\Ticket\GH10566Test::testInsertion' => [
-            'fk-actions',
-            'Uses a many-to-many association whose default join columns ORM declares with ON DELETE CASCADE (gh10566_a).',
-        ],
-        'Doctrine\Tests\ORM\Functional\Ticket\GH10566Test::testRemoval' => [
-            'fk-actions',
-            'Uses a many-to-many association whose default join columns ORM declares with ON DELETE CASCADE (gh10566_a).',
-        ],
-        'Doctrine\Tests\ORM\Functional\Ticket\GH10752Test::testThrowExceptionWhenRemovingPromotionThatIsInUse' => [
-            'fk-actions',
-            'Its mapping declares ON DELETE CASCADE on order_promotion.',
-        ],
-        'Doctrine\Tests\ORM\Functional\Ticket\GH10752Test::testThrowExceptionWhenRemovingPromotionThatIsInUseAndOrderIsNotInMemory' => [
-            'fk-actions',
-            'Its mapping declares ON DELETE CASCADE on order_promotion.',
+            'early-fk',
+            'Its flush deletes or updates a referenced row after removing the references in the same transaction.',
         ],
         'Doctrine\Tests\ORM\Functional\Ticket\GH10912Test::testIssue' => [
-            'fk-actions',
-            'Uses a many-to-many association whose default join columns ORM declares with ON DELETE CASCADE (GH10912User).',
+            'early-fk',
+            'Its flush deletes or updates a referenced row after removing the references in the same transaction.',
         ],
         'Doctrine\Tests\ORM\Functional\Ticket\GH10913Test::testExample1' => [
-            'fk-actions',
-            'Its mapping declares ON DELETE CASCADE on GH10913Entity.',
+            'early-fk',
+            'Its flush deletes or updates a referenced row after removing the references in the same transaction.',
         ],
         'Doctrine\Tests\ORM\Functional\Ticket\GH10913Test::testExample2' => [
-            'fk-actions',
-            'Its mapping declares ON DELETE CASCADE on GH10913Entity.',
+            'early-fk',
+            'Its flush deletes or updates a referenced row after removing the references in the same transaction.',
         ],
         'Doctrine\Tests\ORM\Functional\Ticket\GH10913Test::testExample3' => [
-            'fk-actions',
-            'Its mapping declares ON DELETE CASCADE on GH10913Entity.',
+            'early-fk',
+            'Its flush deletes or updates a referenced row after removing the references in the same transaction.',
         ],
         'Doctrine\Tests\ORM\Functional\Ticket\GH10913Test::testExample4' => [
-            'fk-actions',
-            'Its mapping declares ON DELETE CASCADE on GH10913Entity.',
-        ],
-        'Doctrine\Tests\ORM\Functional\Ticket\GH12505\GH12505Test::testHydrateManyToManyIndexedByInheritedIdAfterFilterChange' => [
-            'fk-actions',
-            'Uses a many-to-many association whose default join columns ORM declares with ON DELETE CASCADE (gh_12505_car).',
-        ],
-        'Doctrine\Tests\ORM\Functional\Ticket\GH12674\GH12674PartialCollectionTest::testFetchJoiningACollectionIntoPartialObjectsDoesNotInitializeThem' => [
-            'fk-actions',
-            'Uses a many-to-many association whose default join columns ORM declares with ON DELETE CASCADE (gh12674_post_tag).',
+            'early-fk',
+            'Its flush deletes or updates a referenced row after removing the references in the same transaction.',
         ],
         'Doctrine\Tests\ORM\Functional\Ticket\GH5742Test::testManyToManyCollectionUpdateBeforeRemoval' => [
-            'fk-actions',
-            'Uses a many-to-many association whose default join columns ORM declares with ON DELETE CASCADE (gh5742person_gh5742toothpastebrand).',
+            'early-fk',
+            'Its flush deletes or updates a referenced row after removing the references in the same transaction.',
         ],
         'Doctrine\Tests\ORM\Functional\Ticket\GH5742Test::testUpdateOneToOneToNewEntityBeforePreviousEntityCanBeRemoved' => [
-            'fk-actions',
-            'Uses a many-to-many association whose default join columns ORM declares with ON DELETE CASCADE (gh5742person_gh5742toothpastebrand).',
-        ],
-        'Doctrine\Tests\ORM\Functional\Ticket\GH5988Test::testDelete' => [
-            'fk-actions',
-            'Uses a many-to-many association whose default join columns ORM declares with ON DELETE CASCADE (GH5988CustomIdObjectTypeChild).',
+            'early-fk',
+            'Its flush deletes or updates a referenced row after removing the references in the same transaction.',
         ],
         'Doctrine\Tests\ORM\Functional\Ticket\GH5998Test::testIssue' => [
-            'fk-actions',
-            'Uses a many-to-many association whose default join columns ORM declares with ON DELETE CASCADE (GH5998JTIChild).',
-        ],
-        'Doctrine\Tests\ORM\Functional\Ticket\GH6029Test::testManyToManyAssociation' => [
-            'fk-actions',
-            'Uses a many-to-many association whose default join columns ORM declares with ON DELETE CASCADE (gh6029user_gh6029group).',
-        ],
-        'Doctrine\Tests\ORM\Functional\Ticket\GH6029Test::testOneToManyAssociation' => [
-            'fk-actions',
-            'Uses a many-to-many association whose default join columns ORM declares with ON DELETE CASCADE (gh6029user_gh6029group).',
-        ],
-        'Doctrine\Tests\ORM\Functional\Ticket\GH6141Test::testEnumDiscriminatorsShouldBeConvertedToString' => [
-            'fk-actions',
-            'Uses a many-to-many association whose default join columns ORM declares with ON DELETE CASCADE (GH6141Boss).',
-        ],
-        'Doctrine\Tests\ORM\Functional\Ticket\GH6464Test::testIssue' => [
-            'fk-actions',
-            'Uses a many-to-many association whose default join columns ORM declares with ON DELETE CASCADE (GH6464Author).',
-        ],
-        'Doctrine\Tests\ORM\Functional\Ticket\GH6937Test::testPhoneNumberIsPopulatedWithFind' => [
-            'fk-actions',
-            'Uses JOINED inheritance, for which ORM generates ON DELETE CASCADE from GH6937Employee to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\Ticket\GH6937Test::testPhoneNumberIsPopulatedWithQueryBuilder' => [
-            'fk-actions',
-            'Uses JOINED inheritance, for which ORM generates ON DELETE CASCADE from GH6937Employee to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\Ticket\GH6937Test::testPhoneNumberIsPopulatedWithQueryBuilderUsingSimpleObjectHydrator' => [
-            'fk-actions',
-            'Uses JOINED inheritance, for which ORM generates ON DELETE CASCADE from GH6937Employee to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Functional\Ticket\GH7012Test::testUpdateEntityWithIdentifierAssociationWithQuotedJoinColumn' => [
-            'fk-actions',
-            'Uses a many-to-many association whose default join columns ORM declares with ON DELETE CASCADE (quote-user-data).',
+            'early-fk',
+            'Its flush deletes or updates a referenced row after removing the references in the same transaction.',
         ],
         'Doctrine\Tests\ORM\Functional\Ticket\GH7039Test::testCountWithInstanceOfParameter' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
-        ],
-        'Doctrine\Tests\ORM\Functional\Ticket\GH7512Test::testFindEntityByAssociationPropertyJoinedChildWithClearMetadata' => [
-            'fk-actions',
-            'Uses a many-to-many association whose default join columns ORM declares with ON DELETE CASCADE (GH7512EntityB).',
-        ],
-        'Doctrine\Tests\ORM\Functional\Ticket\GH7717Test::testManyToManyPersisterIsNullComparison' => [
-            'fk-actions',
-            'Uses a many-to-many association whose default join columns ORM declares with ON DELETE CASCADE (gh7717parent_gh7717child).',
-        ],
-        'Doctrine\Tests\ORM\Functional\Ticket\GH7737Test::memberOfCriteriaShouldBeCompatibleWithQueryBuilder' => [
-            'fk-actions',
-            'Uses a many-to-many association whose default join columns ORM declares with ON DELETE CASCADE (gh7737person_gh7737group).',
-        ],
-        'Doctrine\Tests\ORM\Functional\Ticket\GH8055Test::testNumericDescriminatorColumn' => [
-            'fk-actions',
-            'Uses a many-to-many association whose default join columns ORM declares with ON DELETE CASCADE (GH8055SubClass).',
-        ],
-        'Doctrine\Tests\ORM\Functional\Ticket\GH8127Test::testLoadFieldsFromAllClassesInHierarchy' => [
-            'fk-actions',
-            'Uses a many-to-many association whose default join columns ORM declares with ON DELETE CASCADE (GH8127Middle).',
-        ],
-        'Doctrine\Tests\ORM\Functional\Ticket\GH8415Test::testAssociationIsBasedOnBaseClass' => [
-            'fk-actions',
-            'Uses a many-to-many association whose default join columns ORM declares with ON DELETE CASCADE (GH8415LeafClass).',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\Ticket\GH8443Test::testJoinRootEntityWithForcePartialLoad' => [
-            'fk-actions',
-            'Uses the company models: CompanyPerson declares ON DELETE CASCADE, and their JOINED inheritance makes ORM generate more.',
-        ],
-        'Doctrine\Tests\ORM\Functional\Ticket\GH9109Test::testIssue' => [
-            'fk-actions',
-            'Uses a many-to-many association whose default join columns ORM declares with ON DELETE CASCADE (gh9109product_gh9109user).',
+            'fk-cycles',
+            'Uses the company models, whose tables company_organizations and company_events reference each other.',
         ],
         'Doctrine\Tests\ORM\Functional\Ticket\GH9192Test::testIssue' => [
-            'fk-actions',
-            'Uses a many-to-many association whose default join columns ORM declares with ON DELETE CASCADE (GH9192A).',
-        ],
-        'Doctrine\Tests\ORM\Functional\Ticket\GH9467\GH9467Test::testChildNonInsertableColumnInsert' => [
-            'fk-actions',
-            'Uses a many-to-many association whose default join columns ORM declares with ON DELETE CASCADE (joined_inheritance_child).',
-        ],
-        'Doctrine\Tests\ORM\Functional\Ticket\GH9467\GH9467Test::testChildNonUpdatableColumnInsert' => [
-            'fk-actions',
-            'Uses a many-to-many association whose default join columns ORM declares with ON DELETE CASCADE (joined_inheritance_child).',
-        ],
-        'Doctrine\Tests\ORM\Functional\Ticket\GH9467\GH9467Test::testChildNonWritableColumnInsert' => [
-            'fk-actions',
-            'Uses a many-to-many association whose default join columns ORM declares with ON DELETE CASCADE (joined_inheritance_child).',
-        ],
-        'Doctrine\Tests\ORM\Functional\Ticket\GH9467\GH9467Test::testChildWritableColumnInsert' => [
-            'fk-actions',
-            'Uses a many-to-many association whose default join columns ORM declares with ON DELETE CASCADE (joined_inheritance_child).',
-        ],
-        'Doctrine\Tests\ORM\Functional\Ticket\GH9467\GH9467Test::testRootColumnsInsert' => [
-            'fk-actions',
-            'Uses a many-to-many association whose default join columns ORM declares with ON DELETE CASCADE (joined_inheritance_child).',
-        ],
-        'Doctrine\Tests\ORM\Functional\Ticket\GH9807Test::testHydrateJoinedCollectionWithFirstNullishRow' => [
-            'fk-actions',
-            'Uses a many-to-many association whose default join columns ORM declares with ON DELETE CASCADE (gh9807main_gh9807join).',
-        ],
-        'Doctrine\Tests\ORM\Functional\Ticket\Issue5989Test::testSimpleArrayTypeHydratedCorrectlyInJoinedInheritance' => [
-            'fk-actions',
-            'Uses a many-to-many association whose default join columns ORM declares with ON DELETE CASCADE (issue5989_employees).',
-        ],
-        'Doctrine\Tests\ORM\Functional\Ticket\Issue9300Test::testPersistedCollectionIsPresentInOriginalDataAfterFlush' => [
-            'fk-actions',
-            'Uses a many-to-many association whose default join columns ORM declares with ON DELETE CASCADE (issue9300child_issue9300parent).',
-        ],
-        'Doctrine\Tests\ORM\Functional\Ticket\Issue9300Test::testPersistingCollectionAfterFlushWorksAsExpected' => [
-            'fk-actions',
-            'Uses a many-to-many association whose default join columns ORM declares with ON DELETE CASCADE (issue9300child_issue9300parent).',
-        ],
-        'Doctrine\Tests\ORM\Functional\Ticket\SwitchContextWithFilterAndIndexedRelation\ChangeFiltersTest::testIndexAliasUpdatedWithUpdatedFilter' => [
-            'fk-actions',
-            'Uses a many-to-many association whose default join columns ORM declares with ON DELETE CASCADE (company_category).',
-        ],
-        'Doctrine\Tests\ORM\Functional\Ticket\Ticket4646InstanceOfAbstractTest::testInstanceOf' => [
-            'fk-actions',
-            'Uses a many-to-many association whose default join columns ORM declares with ON DELETE CASCADE (instance_of_abstract_test_employee).',
-        ],
-        'Doctrine\Tests\ORM\Functional\Ticket\Ticket4646InstanceOfMultiLevelTest::testInstanceOf' => [
-            'fk-actions',
-            'Uses a many-to-many association whose default join columns ORM declares with ON DELETE CASCADE (instance_of_multi_level_employee).',
-        ],
-        'Doctrine\Tests\ORM\Functional\Ticket\Ticket4646InstanceOfParametricTest::testInstanceOf' => [
-            'fk-actions',
-            'Uses a many-to-many association whose default join columns ORM declares with ON DELETE CASCADE (instance_of_parametric_employee).',
-        ],
-        'Doctrine\Tests\ORM\Functional\Ticket\Ticket4646InstanceOfTest::testInstanceOf' => [
-            'fk-actions',
-            'Uses a many-to-many association whose default join columns ORM declares with ON DELETE CASCADE (instance_of_test_employee).',
-        ],
-        'Doctrine\Tests\ORM\Functional\Ticket\Ticket4646InstanceOfWithMultipleParametersTest::testInstanceOf' => [
-            'fk-actions',
-            'Uses a many-to-many association whose default join columns ORM declares with ON DELETE CASCADE (instance_of_test_multiple_employee).',
-        ],
-        'Doctrine\Tests\ORM\Tools\Console\Command\MappingDescribeCommandTest::testComplete' => [
-            'fk-actions',
-            'Uses the cache models, whose JOINED inheritance makes ORM generate ON DELETE CASCADE from cache_attraction_contact_info to its root table.',
-        ],
-        'Doctrine\Tests\ORM\Utility\IdentifierFlattenerTest::testFlattenIdentifierWithMutlipleIds' => [
-            'fk-actions',
-            'Its City model references cache_state, which only the cache model set creates, and that set uses JOINED inheritance, for which ORM generates ON DELETE CASCADE.',
-        ],
-        'tests\Doctrine\Tests\ORM\Functional\Ticket\DDC7969Test::testChildEntityRetrievedFromCache' => [
-            'fk-actions',
-            'Uses the cache models, whose JOINED inheritance makes ORM generate ON DELETE CASCADE from cache_attraction_contact_info to its root table.',
+            'early-fk',
+            'Its flush deletes or updates a referenced row after removing the references in the same transaction.',
         ],
         'Doctrine\Tests\ORM\Functional\Ticket\DDC1461Test::testChangeDetectionDeferredExplicit' => [
             'fk-cycles',

@@ -25,13 +25,22 @@ declare(strict_types=1);
  *
  * Pass 1 runs the suite with skiplist.php applied by SkipListExtension. It
  * fails when PHPUnit fails, which means some test outside the skip list failed,
- * or when a skip-list entry matched no test. Pass 2 runs only the listed tests
- * without skipping and reports entries whose tests now pass.
+ * or when a skip-list entry matched no test. Pass 2 runs only the listed tests,
+ * and the tests they depend on, without skipping and reports entries whose
+ * tests now pass. Entries of an order-dependent category are expected to pass
+ * outside the full suite and are not reported as stale.
  */
 
-const ORM_TAG          = '3.7.6';
-const DEFAULT_DBAL     = '4.5.0';
-const NETWORK_ATTEMPTS = 3;
+const ORM_TAG              = '3.7.6';
+const DEFAULT_DBAL         = '4.5.0';
+const NETWORK_ATTEMPTS     = 3;
+const VERIFY_FILTER_LENGTH = 16000;
+
+/**
+ * Skip-list categories whose tests fail only in some test orders, so passing
+ * in the verification pass, which runs a subset, does not make an entry stale.
+ */
+const ORDER_DEPENDENT_CATEGORIES = ['row-order', 'leftover-sequences'];
 
 /** @var list<string> $arguments */
 $arguments = $_SERVER['argv'];
@@ -65,15 +74,16 @@ function main(array $argv): void
     installDependencies($directory, $root, $suite, $ref, $dbal, $options['offline']);
     copyFile(sprintf('%s/%s/phpunit.xml', __DIR__, $suite), $directory . '/phpunit.duckdb.xml');
 
-    $messages = listedEntries($suite);
+    $categories = listedEntries($suite);
+    $entries    = array_keys($categories);
 
-    $failed = runSkipPass($directory, $messages, $options['phpunit']);
+    $failed = runSkipPass($directory, $entries, $options['phpunit']);
 
     if (! $options['verify']) {
         exit($failed ? 1 : 0);
     }
 
-    runVerifyPass($directory, $messages, $options['phpunit']);
+    runVerifyPass($directory, $categories, $options['phpunit']);
 
     exit($failed ? 1 : 0);
 }
@@ -143,12 +153,16 @@ function checkOut(string $repository, string $ref, string $directory, bool $offl
     }
 
     if (! $offline && ($isBranch || ! headIsTag($directory, $ref))) {
+        // A branch is fetched into its remote-tracking ref: git refuses to
+        // fetch into the local branch that the clone checked out.
+        $localRef = $isBranch ? 'refs/remotes/origin/' . $ref : $refspec;
+
         retry(
             sprintf('fetch %s %s', $repository, $ref),
-            ['git', '-C', $directory, 'fetch', '--quiet', '--depth', '1', 'origin', $refspec . ':' . $refspec],
+            ['git', '-C', $directory, 'fetch', '--quiet', '--depth', '1', 'origin', '+' . $refspec . ':' . $localRef],
         );
 
-        command(['git', '-C', $directory, 'checkout', '--quiet', '--force', '--detach', $refspec]);
+        command(['git', '-C', $directory, 'checkout', '--quiet', '--force', '--detach', $localRef]);
     }
 
     // Drops an earlier run's patch; untracked files such as vendor/ stay.
@@ -247,7 +261,7 @@ function installDependencies(string $directory, string $root, string $suite, str
     file_put_contents($stampFile, $stamp);
 }
 
-/** @return list<string> Skip-list keys of the suite; SkipListExtension validates them. */
+/** @return array<string, string> Category per skip-list key of the suite; SkipListExtension validates them. */
 function listedEntries(string $suite): array
 {
     $list = require __DIR__ . '/skiplist.php';
@@ -256,7 +270,13 @@ function listedEntries(string $suite): array
         fail(sprintf('tests/Upstream/skiplist.php has no list for the suite "%s".', $suite));
     }
 
-    return array_map(strval(...), array_keys($list[$suite]));
+    $categories = [];
+
+    foreach ($list[$suite] as $key => $entry) {
+        $categories[(string) $key] = is_array($entry) && is_string($entry[0] ?? null) ? $entry[0] : '';
+    }
+
+    return $categories;
 }
 
 /**
@@ -307,61 +327,221 @@ function runSkipPass(string $directory, array $entries, array $phpunitArguments)
 }
 
 /**
- * @param list<string> $entries
- * @param list<string> $phpunitArguments
+ * @param array<string, string> $categories       category per skip-list entry
+ * @param list<string>          $phpunitArguments
  */
-function runVerifyPass(string $directory, array $entries, array $phpunitArguments): void
+function runVerifyPass(string $directory, array $categories, array $phpunitArguments): void
 {
-    if ($entries === []) {
+    if ($categories === []) {
         return;
     }
 
     section('Pass 2: skip-listed tests run without skipping');
 
-    $methods = [];
+    $entries  = array_keys($categories);
+    $outcomes = [];
+    $logs     = [];
 
-    foreach ($entries as $key) {
-        $methods[(string) preg_replace('/#.*$/s', '', $key)] = true;
+    foreach (verifyFilters($directory, $entries) as $index => $filter) {
+        $report = sprintf('%s/.duckdb-verify-report-%d.json', $directory, $index);
+        $log    = sprintf('%s/.duckdb-verify-%d.log', $directory, $index);
+        @unlink($report);
+
+        $logs[] = $log;
+
+        runPhpUnit($directory, 'verify', $report, [...$phpunitArguments, '--filter', $filter], $log);
+
+        $chunk = readReport($report);
+
+        if ($chunk === null) {
+            annotate('warning', sprintf('The verification pass wrote no report; see %s.', $log));
+
+            return;
+        }
+
+        // Every run reports every entry, so an entry keeps the outcomes of
+        // the run whose filter selected it.
+        foreach ($chunk as $key => $counts) {
+            if (! is_array($counts) || $counts === []) {
+                continue;
+            }
+
+            $outcomes[$key] = $counts;
+        }
     }
 
-    $filter = '/^(?:' . implode('|', array_map(
-        static fn (string $method): string => preg_quote($method, '/'),
-        array_keys($methods),
-    )) . ')(?: with data set .*)?$/';
+    $stale          = [];
+    $notRun         = [];
+    $orderDependent = [];
 
-    $report = $directory . '/.duckdb-verify-report.json';
-    $log    = $directory . '/.duckdb-verify.log';
-    @unlink($report);
+    foreach ($categories as $key => $category) {
+        $counts = $outcomes[$key] ?? [];
 
-    runPhpUnit($directory, 'verify', $report, [...$phpunitArguments, '--filter', $filter], $log);
+        if ($counts === []) {
+            $notRun[] = $key;
 
-    $outcomes = readReport($report);
+            continue;
+        }
 
-    if ($outcomes === null) {
-        annotate('warning', sprintf('The verification pass wrote no report; see %s.', $log));
+        if (array_keys($counts) !== ['passed']) {
+            continue;
+        }
 
-        return;
-    }
+        if (in_array($category, ORDER_DEPENDENT_CATEGORIES, true)) {
+            $orderDependent[] = $key;
 
-    $stale = [];
-
-    foreach ($outcomes as $key => $counts) {
-        if (! is_array($counts) || array_keys($counts) !== ['passed']) {
             continue;
         }
 
         $stale[] = $key;
     }
 
-    if ($stale === []) {
-        fwrite(STDOUT, sprintf("Every skip-listed test still fails or errors (PHPUnit output: %s).\n", $log));
-
-        return;
+    foreach ($notRun as $key) {
+        annotate('warning', sprintf('Skip-list entry %s did not run in the verification pass (PHPUnit output: %s).', $key, implode(', ', $logs)));
     }
 
     foreach ($stale as $key) {
         annotate('warning', sprintf('Skip-list entry %s now passes; remove it from tests/Upstream/skiplist.php.', $key));
     }
+
+    foreach ($orderDependent as $key) {
+        fwrite(STDOUT, sprintf("Skip-list entry %s passed outside the full suite, which its category expects; it stays listed.\n", $key));
+    }
+
+    if ($stale !== [] || $notRun !== []) {
+        return;
+    }
+
+    fwrite(STDOUT, sprintf("No skip-list entry is stale (PHPUnit output: %s).\n", implode(', ', $logs)));
+}
+
+/**
+ * PHPUnit --filter patterns that together select the listed test methods.
+ * PCRE refuses patterns whose compiled form exceeds 64 KiB, and PHPUnit then
+ * silently runs no test, so methods are grouped by class and split into
+ * patterns of at most VERIFY_FILTER_LENGTH characters.
+ *
+ * @param list<string> $entries
+ *
+ * @return list<string>
+ */
+function verifyFilters(string $directory, array $entries): array
+{
+    $methodsByClass = [];
+
+    foreach ($entries as $key) {
+        [$class, $method] = explode('::', (string) preg_replace('/#.*$/s', '', $key), 2);
+
+        $pending = [$method];
+
+        // PHPUnit's --filter does not pull in the tests a selected test
+        // depends on, and skips a test whose dependencies did not run.
+        while ($pending !== []) {
+            $next = array_shift($pending);
+
+            if (isset($methodsByClass[$class][$next])) {
+                continue;
+            }
+
+            $methodsByClass[$class][$next] = true;
+
+            array_push($pending, ...testDependencies($directory, $class, $next));
+        }
+    }
+
+    $filters      = [];
+    $alternatives = [];
+    $length       = 0;
+
+    foreach ($methodsByClass as $class => $methods) {
+        $alternative = preg_quote($class . '::', '/') . '(?:' . implode('|', array_map(
+            static fn (string $method): string => preg_quote($method, '/'),
+            array_keys($methods),
+        )) . ')';
+
+        if ($alternatives !== [] && $length + strlen($alternative) > VERIFY_FILTER_LENGTH) {
+            $filters[]    = verifyFilter($alternatives);
+            $alternatives = [];
+            $length       = 0;
+        }
+
+        $alternatives[] = $alternative;
+        $length        += strlen($alternative) + 1;
+    }
+
+    if ($alternatives !== []) {
+        $filters[] = verifyFilter($alternatives);
+    }
+
+    return $filters;
+}
+
+/**
+ * The same-class tests that a test method names in #[Depends('method')]
+ * attributes, read from the test's source file.
+ *
+ * @return list<string>
+ */
+function testDependencies(string $directory, string $class, string $method): array
+{
+    $file = testClassFile($directory, $class);
+
+    if ($file === null) {
+        return [];
+    }
+
+    $source = (string) file_get_contents($file);
+
+    // The attribute block directly above the method declaration.
+    $pattern = '/((?:^[ \t]*#\[[^\n]*\]\s*\n)*)^[ \t]*(?:final\s+)?public\s+function\s+' . preg_quote($method, '/') . '\s*\(/m';
+
+    if (preg_match($pattern, $source, $match) !== 1) {
+        return [];
+    }
+
+    preg_match_all('/#\[Depends\(\s*[\'"](\w+)[\'"]\s*\)\]/', $match[1], $dependencies);
+
+    return $dependencies[1];
+}
+
+/** The source file of a test class, found through the checkout's PSR-4 map. */
+function testClassFile(string $directory, string $class): string|null
+{
+    /** @var array<string, mixed> $maps */
+    static $maps = [];
+
+    $maps[$directory] ??= require $directory . '/vendor/composer/autoload_psr4.php';
+    $map                = $maps[$directory];
+
+    if (! is_array($map)) {
+        return null;
+    }
+
+    foreach ($map as $prefix => $paths) {
+        if (! is_string($prefix) || ! is_array($paths) || ! str_starts_with($class, $prefix)) {
+            continue;
+        }
+
+        foreach ($paths as $path) {
+            if (! is_string($path)) {
+                continue;
+            }
+
+            $file = $path . '/' . str_replace('\\', '/', substr($class, strlen($prefix))) . '.php';
+
+            if (is_file($file)) {
+                return $file;
+            }
+        }
+    }
+
+    return null;
+}
+
+/** @param non-empty-list<string> $alternatives */
+function verifyFilter(array $alternatives): string
+{
+    return '/^(?:' . implode('|', $alternatives) . ')(?: with data set .*)?$/';
 }
 
 /**
