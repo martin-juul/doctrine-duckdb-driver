@@ -19,8 +19,8 @@ final class EarlyForeignKeyCheckViolation extends ForeignKeyConstraintViolationE
     private const string EXPLANATION = 'The row may still be referenced, or DuckDB\'s early foreign-key check '
         . 'may have rejected a valid sequence of statements. DuckDB checks foreign keys when each statement '
         . 'runs, does not see child rows deleted earlier in the same transaction until it commits, and runs '
-        . 'an UPDATE that sets a primary key or unique column as a delete and an insert, so such an update '
-        . 'of a referenced row fails even when the key keeps its value. See "Over-eager constraint checking '
+        . 'an UPDATE that sets an indexed column, such as a key, as a delete and an insert, so such an update '
+        . 'of a referenced row fails even when the value does not change. See "Over-eager constraint checking '
         . 'in foreign keys" in DuckDB\'s documentation on indexes.';
 
     public function __construct(DriverExceptionInterface $driverException, Query|null $query)

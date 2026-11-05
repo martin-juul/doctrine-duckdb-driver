@@ -58,7 +58,8 @@ use const PREG_UNMATCHED_AS_NULL;
  * 2. drops the original tables and the dropped tables, children first;
  * 3. creates the new and the rebuilt tables under their final names, parents
  *    first, with inline foreign keys and the owned sequences of the old
- *    tables, so that IDs continue;
+ *    tables, so that IDs continue, leaving out the keys that the target
+ *    schema leaves out to break cycles ({@see RebuildPlan});
  * 4. copies the rows back, parents first, from each old column to its new
  *    column, never by position;
  * 5. drops the staging tables, then recreates indexes and comments, and the
@@ -156,7 +157,13 @@ final class TableRebuilder
 
         $steps = array_merge(
             $steps,
-            $this->tableSteps($plan->rebuilds, $diff->getCreatedTables(), $diff->getDroppedTables()),
+            $this->tableSteps(
+                $plan->rebuilds,
+                $diff->getCreatedTables(),
+                $diff->getDroppedTables(),
+                $plan->omittedForeignKeys,
+                $plan->omittedOldForeignKeys,
+            ),
         );
 
         // A sequence that a dropped table's default uses can be dropped only after the table.
@@ -187,7 +194,10 @@ final class TableRebuilder
             }
         }
 
-        return $this->bracket(array_merge($steps, $this->tableSteps($plan->rebuilds, [], [])), $plan->rebuilds);
+        return $this->bracket(
+            array_merge($steps, $this->tableSteps($plan->rebuilds, [], [], [], [])),
+            $plan->rebuilds,
+        );
     }
 
     /**
@@ -199,7 +209,7 @@ final class TableRebuilder
      */
     public function rebuildSteps(array $rebuilds): array
     {
-        return $this->bracket($this->tableSteps($rebuilds, [], []), $rebuilds);
+        return $this->bracket($this->tableSteps($rebuilds, [], [], [], []), $rebuilds);
     }
 
     /**
@@ -323,11 +333,18 @@ final class TableRebuilder
      * @param array<string, Rebuild> $rebuilds
      * @param array<Table>           $created
      * @param array<Table>           $dropped
+     * @param array<string, true>    $omittedForeignKeys    The keys that the target schema leaves out to break cycles.
+     * @param array<string, true>    $omittedOldForeignKeys The keys that the old schema leaves out to break cycles.
      *
      * @return list<Step>
      */
-    private function tableSteps(array $rebuilds, array $created, array $dropped): array
-    {
+    private function tableSteps(
+        array $rebuilds,
+        array $created,
+        array $dropped,
+        array $omittedForeignKeys,
+        array $omittedOldForeignKeys,
+    ): array {
         $rebuilds = array_map($this->withDeclaredColumnNames(...), $rebuilds);
         $steps    = [];
         $reused   = [];
@@ -383,7 +400,9 @@ final class TableRebuilder
             $toDrop[$key] = $rebuild['old'];
         }
 
-        foreach (array_reverse(self::parentsFirst($toDrop)) as $key) {
+        $dropOrder = self::parentsFirst($toDrop, $this->platform->createdForeignKeys($toDrop, $omittedOldForeignKeys));
+
+        foreach (array_reverse($dropOrder) as $key) {
             if (isset($rebuilds[$key])) {
                 $steps[] = self::step($this->platform->getDropTableSQL(
                     $rebuilds[$key]['old']->getObjectName()->toSQL($this->platform),
@@ -417,7 +436,7 @@ final class TableRebuilder
         $order    = [];
         $current  = null;
 
-        foreach ($this->platform->getCreateTablesSQL($toCreate) as $sql) {
+        foreach ($this->platform->createTablesSQL($toCreate, $omittedForeignKeys) as $sql) {
             if (str_starts_with($sql, 'CREATE SEQUENCE ')) {
                 if (! isset($reused[$sql])) {
                     $steps[] = self::step($sql);
@@ -661,21 +680,21 @@ final class TableRebuilder
     }
 
     /**
-     * The foreign keys of the table that reference the table itself.
+     * The foreign keys of the table that reference the table itself and that
+     * the platform creates.
      *
      * @return list<ForeignKeyConstraint>
      */
     private function selfReferences(Table $table): array
     {
-        if ($this->platform->omitsForeignKeys()) {
-            return [];
-        }
-
         $key        = RebuildPlan::tableKey($table->getObjectName());
         $references = [];
 
         foreach ($table->getForeignKeys() as $foreignKey) {
-            if (RebuildPlan::tableKey($foreignKey->getReferencedTableName()) !== $key) {
+            if (
+                RebuildPlan::tableKey($foreignKey->getReferencedTableName()) !== $key
+                || ! $this->platform->createsForeignKey($foreignKey)
+            ) {
                 continue;
             }
 
@@ -860,28 +879,30 @@ final class TableRebuilder
      * Orders tables so that every table follows the tables it references;
      * self-references and references to tables outside the set are ignored.
      *
-     * @param array<string, Table> $tables
+     * @param array<string, Table>                      $tables
+     * @param array<string, list<ForeignKeyConstraint>> $foreignKeys The foreign keys to follow, per table.
      *
      * @return list<string>
      */
-    private static function parentsFirst(array $tables): array
+    private static function parentsFirst(array $tables, array $foreignKeys): array
     {
         $sorted  = [];
         $visited = [];
 
         foreach (array_keys($tables) as $key) {
-            self::visit($key, $tables, $visited, $sorted);
+            self::visit($key, $tables, $foreignKeys, $visited, $sorted);
         }
 
         return $sorted;
     }
 
     /**
-     * @param array<string, Table> $tables
-     * @param array<string, true>  $visited
-     * @param list<string>         $sorted
+     * @param array<string, Table>                      $tables
+     * @param array<string, list<ForeignKeyConstraint>> $foreignKeys
+     * @param array<string, true>                       $visited
+     * @param list<string>                              $sorted
      */
-    private static function visit(string $key, array $tables, array &$visited, array &$sorted): void
+    private static function visit(string $key, array $tables, array $foreignKeys, array &$visited, array &$sorted): void
     {
         if (isset($visited[$key])) {
             return;
@@ -889,14 +910,14 @@ final class TableRebuilder
 
         $visited[$key] = true;
 
-        foreach ($tables[$key]->getForeignKeys() as $foreignKey) {
+        foreach ($foreignKeys[$key] ?? [] as $foreignKey) {
             $parent = RebuildPlan::tableKey($foreignKey->getReferencedTableName());
 
             if ($parent === $key || ! isset($tables[$parent])) {
                 continue;
             }
 
-            self::visit($parent, $tables, $visited, $sorted);
+            self::visit($parent, $tables, $foreignKeys, $visited, $sorted);
         }
 
         $sorted[] = $key;

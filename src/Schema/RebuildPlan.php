@@ -28,6 +28,11 @@ use function strtolower;
  * DBAL cannot represent and introspection skips, as DuckDB's catalog reports
  * them; only a caller with a connection can read them.
  *
+ * The plan also names the foreign keys that the compared schemas leave out
+ * to break cycles between their tables, keyed by the identity that
+ * {@see \MartinJuul\DBAL\DuckDB\Platform\ForeignKeyCycles::identity()}
+ * gives them.
+ *
  * @internal
  *
  * @phpstan-type ExpressionIndex array{schema: string, table: string, name: non-empty-string, unique: bool, sql: string}
@@ -41,11 +46,21 @@ use function strtolower;
 final class RebuildPlan
 {
     /**
-     * @param array<string, list<string>> $nativeSQL The native statements per altered table, keyed by {@see tableKey()}.
-     * @param array<string, Rebuild>      $rebuilds  The tables to rebuild, keyed by {@see tableKey()} of the old table.
+     * @param array<string, list<string>> $nativeSQL             The native statements per altered table, keyed by
+     *                                                           {@see tableKey()}.
+     * @param array<string, Rebuild>      $rebuilds              The tables to rebuild, keyed by {@see tableKey()} of
+     *                                                           the old table.
+     * @param array<string, true>         $omittedForeignKeys    The foreign keys that the target schema leaves out
+     *                                                           to break cycles, which creating tables leaves out.
+     * @param array<string, true>         $omittedOldForeignKeys The foreign keys that the old schema leaves out to
+     *                                                           break cycles, which the drop order ignores.
      */
-    public function __construct(public readonly array $nativeSQL, public readonly array $rebuilds)
-    {
+    public function __construct(
+        public readonly array $nativeSQL,
+        public readonly array $rebuilds,
+        public readonly array $omittedForeignKeys = [],
+        public readonly array $omittedOldForeignKeys = [],
+    ) {
     }
 
     /**

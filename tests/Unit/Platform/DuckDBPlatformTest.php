@@ -18,12 +18,16 @@ use Doctrine\DBAL\Schema\UniqueConstraint;
 use Doctrine\DBAL\TransactionIsolationLevel;
 use Doctrine\DBAL\Types\Type;
 use Doctrine\DBAL\Types\Types;
-use MartinJuul\DBAL\DuckDB\Exception\ForeignKeyCycle;
 use MartinJuul\DBAL\DuckDB\Platform\DuckDBPlatform;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 
+use function array_map;
+use function array_reverse;
 use function implode;
+use function in_array;
+use function preg_match_all;
+use function sort;
 
 final class DuckDBPlatformTest extends TestCase
 {
@@ -377,29 +381,170 @@ final class DuckDBPlatformTest extends TestCase
         self::assertStringContainsString('FOREIGN KEY (parent_id) REFERENCES parent (id)', implode("\n", $sql));
     }
 
-    public function testCycleIsRejectedNamingBothTables(): void
+    /** Covers AE12: the nullable key of a two-table cycle is left out, and the tables are created parents first. */
+    public function testTwoTableCycleLeavesOutTheNullableKey(): void
     {
-        $users = self::table(
-            'users',
-            ['id', 'last_post_id'],
-            ['id'],
-            foreignKeys: [self::foreignKey('fk_users_last_post', 'last_post_id', 'posts', 'id')],
+        $sql = $this->platform->getCreateTablesSQL([self::users(), self::posts()]);
+
+        self::assertSame(
+            [
+                'CREATE TABLE users (id INTEGER NOT NULL, last_post_id INTEGER DEFAULT NULL, PRIMARY KEY (id))',
+                'CREATE INDEX IDX_1483A5E92D053F64 ON users (last_post_id)',
+                'CREATE TABLE posts (id INTEGER NOT NULL, author_id INTEGER NOT NULL, PRIMARY KEY (id), '
+                    . 'CONSTRAINT fk_posts_author FOREIGN KEY (author_id) REFERENCES users (id))',
+                'CREATE INDEX IDX_885DBAFAF675F31B ON posts (author_id)',
+            ],
+            $sql,
+        );
+        self::assertSame(
+            ['DROP TABLE "posts"', 'DROP TABLE "users"'],
+            $this->platform->getDropTablesSQL([self::users(), self::posts()]),
+        );
+    }
+
+    public function testThreeTableCycleLeavesOutOneKey(): void
+    {
+        $sql = $this->platform->getCreateTablesSQL([
+            self::table('a', ['id', 'b_id'], ['id'], foreignKeys: [self::foreignKey('fk_a_b', 'b_id', 'b', 'id')]),
+            self::table('b', ['id', 'c_id'], ['id'], foreignKeys: [self::foreignKey('fk_b_c', 'c_id', 'c', 'id')]),
+            self::table(
+                'c',
+                ['id', 'a_id'],
+                ['id'],
+                foreignKeys: [self::foreignKey('fk_c_a', 'a_id', 'a', 'id')],
+                nullable: ['a_id'],
+            ),
+        ]);
+
+        self::assertSame(['fk_a_b', 'fk_b_c'], self::createdForeignKeys($sql));
+        self::assertSame(['c', 'b', 'a'], self::createdTables($sql));
+    }
+
+    /** Two cycles that share the key a -> b: leaving out that key alone breaks both. */
+    public function testCyclesSharingAKeyLeaveOutOnlyThatKey(): void
+    {
+        $sql = $this->platform->getCreateTablesSQL([
+            self::table(
+                'a',
+                ['id', 'b_id'],
+                ['id'],
+                foreignKeys: [self::foreignKey('fk_a_b', 'b_id', 'b', 'id')],
+            ),
+            self::table(
+                'b',
+                ['id', 'a_id', 'c_id'],
+                ['id'],
+                foreignKeys: [
+                    self::foreignKey('fk_b_a', 'a_id', 'a', 'id'),
+                    self::foreignKey('fk_b_c', 'c_id', 'c', 'id'),
+                ],
+                nullable: ['a_id', 'c_id'],
+            ),
+            self::table(
+                'c',
+                ['id', 'a_id'],
+                ['id'],
+                foreignKeys: [self::foreignKey('fk_c_a', 'a_id', 'a', 'id')],
+                nullable: ['a_id'],
+            ),
+        ]);
+
+        self::assertSame(['fk_b_a', 'fk_b_c', 'fk_c_a'], self::createdForeignKeys($sql));
+        self::assertSame(['a', 'c', 'b'], self::createdTables($sql));
+    }
+
+    /** Two cycles through table b share no key, so one key of each is left out, the nullable one where there is one. */
+    public function testCyclesSharingATableLeaveOutOneKeyEach(): void
+    {
+        $sql = $this->platform->getCreateTablesSQL([
+            self::table('a', ['id', 'b_id'], ['id'], foreignKeys: [self::foreignKey('fk_a_b', 'b_id', 'b', 'id')]),
+            self::table(
+                'b',
+                ['id', 'a_id', 'c_id'],
+                ['id'],
+                foreignKeys: [
+                    self::foreignKey('fk_b_a', 'a_id', 'a', 'id'),
+                    self::foreignKey('fk_b_c', 'c_id', 'c', 'id'),
+                ],
+                nullable: ['a_id'],
+            ),
+            self::table('c', ['id', 'b_id'], ['id'], foreignKeys: [self::foreignKey('fk_c_b', 'b_id', 'b', 'id')]),
+        ]);
+
+        self::assertSame(['fk_a_b', 'fk_c_b'], self::createdForeignKeys($sql));
+    }
+
+    /** The same key is left out whatever the order of the tables and of their keys. */
+    public function testTheLeftOutKeyDoesNotDependOnOrder(): void
+    {
+        $tables = [
+            self::table('a', ['id', 'b_id'], ['id'], foreignKeys: [self::foreignKey('fk_a_b', 'b_id', 'b', 'id')]),
+            self::table(
+                'b',
+                ['id', 'a_id', 'c_id'],
+                ['id'],
+                foreignKeys: [
+                    self::foreignKey('fk_b_a', 'a_id', 'a', 'id'),
+                    self::foreignKey('fk_b_c', 'c_id', 'c', 'id'),
+                ],
+            ),
+            self::table('c', ['id', 'b_id'], ['id'], foreignKeys: [self::foreignKey('fk_c_b', 'b_id', 'b', 'id')]),
+        ];
+
+        $expected = ['fk_b_a', 'fk_c_b'];
+
+        self::assertSame($expected, self::createdForeignKeys($this->platform->getCreateTablesSQL($tables)));
+        self::assertSame(
+            $expected,
+            self::createdForeignKeys($this->platform->getCreateTablesSQL(array_reverse($tables))),
+        );
+        self::assertSame(
+            $expected,
+            self::createdForeignKeys($this->platform->getCreateTablesSQL([$tables[1], $tables[2], $tables[0]])),
         );
 
-        $posts = self::table(
-            'posts',
-            ['id', 'author_id'],
-            ['id'],
-            foreignKeys: [self::foreignKey('fk_posts_author', 'author_id', 'users', 'id')],
-        );
+        $reversedKeys = $tables[1]->edit()
+            ->setForeignKeyConstraints(...array_reverse($tables[1]->getForeignKeys()))
+            ->create();
 
-        try {
-            $this->platform->getCreateTablesSQL([$users, $posts]);
-            self::fail('A foreign-key cycle must be rejected');
-        } catch (ForeignKeyCycle $e) {
-            self::assertStringContainsString('"users"', $e->getMessage());
-            self::assertStringContainsString('"posts"', $e->getMessage());
-        }
+        self::assertSame(
+            $expected,
+            self::createdForeignKeys($this->platform->getCreateTablesSQL([$tables[2], $reversedKeys, $tables[0]])),
+        );
+    }
+
+    /** A key left out for its referential action breaks no cycle of its own; the plain cycle still loses one key. */
+    public function testCycleNextToAKeyWithAnUnenforceableAction(): void
+    {
+        $sql = $this->platform->getCreateTablesSQL([
+            self::table(
+                'a',
+                ['id', 'b_id', 'c_id'],
+                ['id'],
+                foreignKeys: [
+                    self::foreignKey('fk_a_b', 'b_id', 'b', 'id'),
+                    self::foreignKey('fk_a_c', 'c_id', 'c', 'id'),
+                ],
+            ),
+            self::table(
+                'b',
+                ['id', 'a_id'],
+                ['id'],
+                foreignKeys: [self::foreignKey('fk_b_a', 'a_id', 'a', 'id')],
+                nullable: ['a_id'],
+            ),
+            self::table(
+                'c',
+                ['id', 'a_id'],
+                ['id'],
+                foreignKeys: [
+                    self::foreignKeyWithAction('fk_c_a', 'a_id', 'a', 'id', 'onDelete', ReferentialAction::CASCADE),
+                ],
+            ),
+        ]);
+
+        self::assertSame(['fk_a_b', 'fk_a_c'], self::createdForeignKeys($sql));
+        self::assertSame(['b', 'c', 'a'], self::createdTables($sql));
     }
 
     public function testTablesAreOrderedParentsFirst(): void
@@ -546,6 +691,7 @@ final class DuckDBPlatformTest extends TestCase
      * @param list<Index>                      $indexes
      * @param list<UniqueConstraint>           $uniqueConstraints
      * @param list<ForeignKeyConstraint>       $foreignKeys
+     * @param list<non-empty-string>           $nullable          The columns that accept NULL.
      */
     private static function table(
         string $name,
@@ -554,11 +700,18 @@ final class DuckDBPlatformTest extends TestCase
         array $indexes = [],
         array $uniqueConstraints = [],
         array $foreignKeys = [],
+        array $nullable = [],
     ): Table {
         $editor = Table::editor()->setUnquotedName($name);
 
         foreach ($columns as $column) {
-            $editor->addColumn(Column::editor()->setUnquotedName($column)->setTypeName(Types::INTEGER)->create());
+            $editor->addColumn(
+                Column::editor()
+                    ->setUnquotedName($column)
+                    ->setTypeName(Types::INTEGER)
+                    ->setNotNull(! in_array($column, $nullable, true))
+                    ->create(),
+            );
         }
 
         return $editor
@@ -611,5 +764,58 @@ final class DuckDBPlatformTest extends TestCase
         }
 
         return $editor->setOnUpdateAction($action)->create();
+    }
+
+    private static function users(): Table
+    {
+        return self::table(
+            'users',
+            ['id', 'last_post_id'],
+            ['id'],
+            foreignKeys: [self::foreignKey('fk_users_last_post', 'last_post_id', 'posts', 'id')],
+            nullable: ['last_post_id'],
+        );
+    }
+
+    private static function posts(): Table
+    {
+        return self::table(
+            'posts',
+            ['id', 'author_id'],
+            ['id'],
+            foreignKeys: [self::foreignKey('fk_posts_author', 'author_id', 'users', 'id')],
+        );
+    }
+
+    /**
+     * The names of the foreign keys that the statements create, sorted.
+     *
+     * @param list<string> $sql
+     *
+     * @return list<string>
+     */
+    private static function createdForeignKeys(array $sql): array
+    {
+        preg_match_all('/CONSTRAINT (\w+) FOREIGN KEY/', implode("\n", $sql), $matches);
+
+        $names = $matches[1];
+
+        sort($names);
+
+        return $names;
+    }
+
+    /**
+     * The tables that the statements create, in order.
+     *
+     * @param list<string> $sql
+     *
+     * @return list<string>
+     */
+    private static function createdTables(array $sql): array
+    {
+        preg_match_all('/^CREATE TABLE (\w+) /m', implode("\n", $sql), $matches);
+
+        return array_map('strval', $matches[1]);
     }
 }

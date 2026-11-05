@@ -78,7 +78,7 @@ Most of these fail loudly with an error that explains the limit. [docs/limitatio
 - No row locks: `forUpdate()` and ORM's pessimistic locks throw. Use optimistic locking.
 - `lastInsertId()` throws. Use `INSERT … RETURNING` or sequences.
 - Nested transactions are flattened. A rollback at an inner level makes the whole transaction roll back.
-- Foreign keys that ask for `CASCADE`, `SET NULL` or `SET DEFAULT` are left out, because DuckDB cannot enforce them; the application enforces those relations. Other foreign keys are real, cannot form cycles between tables, and DuckDB checks them earlier than other databases.
+- Foreign keys that ask for `CASCADE`, `SET NULL` or `SET DEFAULT` are left out, because DuckDB cannot enforce them; the application enforces those relations. Where foreign keys form a cycle between tables, one key per cycle is left out and application-enforced. The other foreign keys are real, and DuckDB checks them earlier than other databases.
 - String and binary lengths are not enforced: `VARCHAR(255)` becomes `VARCHAR`.
 - Some schema changes rebuild whole tables, which costs memory and time on large tables.
 - Across processes, a database file has either one writer or many readers, never both. See [docs/deployment.md](docs/deployment.md).

@@ -19,6 +19,7 @@ use Doctrine\DBAL\Schema\SchemaDiff;
 use Doctrine\DBAL\Schema\Table;
 use Doctrine\DBAL\Schema\TableDiff;
 use MartinJuul\DBAL\DuckDB\Platform\DuckDBPlatform;
+use MartinJuul\DBAL\DuckDB\Platform\ForeignKeyCycles;
 
 use function array_keys;
 use function array_map;
@@ -59,6 +60,22 @@ use function strtolower;
  * created with its column pairs in the referenced key's order is compared in
  * the order of the index on its columns, as it was declared.
  *
+ * {@see self::compareSchemas()} also ignores the keys that the new schema
+ * leaves out to break cycles between its tables (see
+ * {@see DuckDBPlatform::omittedCycleForeignKeys()}), on both sides, and the
+ * keys that the old schema leaves out for its own cycles, on the old side.
+ * A declared schema with cycles therefore compares equal to the database
+ * created from it, in both directions. The diff's created tables still
+ * declare their left-out keys; the registered plan names them, so that
+ * {@see DuckDBPlatform::getAlterSchemaSQL()} leaves them out too. Rebuild
+ * closures and drop order follow the keys the old schema creates.
+ *
+ * {@see self::compareTables()} sees a single table and therefore no cycle:
+ * comparing one table of a cycle with its declaration proposes adding the
+ * left-out key, and applying that diff fails at the rebuild's drop, because
+ * the other table of the cycle references the table. ORM's schema tool and
+ * validator, Doctrine Migrations and DBAL's schema manager compare schemas.
+ *
  * With a connection, each rebuild also carries the indexes on expressions of
  * its table, which DBAL cannot represent, so that the rebuild recreates them.
  *
@@ -76,12 +93,29 @@ final class DuckDBComparator extends Comparator
         parent::__construct($platform, $config);
     }
 
+    /**
+     * While {@see self::compareSchemas()} runs: the keys left out of the old
+     * and of the new schema's tables, keyed by {@see ForeignKeyCycles::identity()}.
+     *
+     * @var array{old: array<string, true>, new: array<string, true>}
+     */
+    private array $omitted = ['old' => [], 'new' => []];
+
     /** @throws Exception */
     public function compareSchemas(Schema $oldSchema, Schema $newSchema): SchemaDiff
     {
-        $diff = parent::compareSchemas($oldSchema, $newSchema);
+        $oldOmitted = $this->platform->omittedCycleForeignKeys($oldSchema->getTables());
+        $newOmitted = $this->platform->omittedCycleForeignKeys($newSchema->getTables());
 
-        $this->platform->registerRebuildPlan($diff, $this->plan($oldSchema, $newSchema, $diff));
+        $this->omitted = ['old' => $oldOmitted + $newOmitted, 'new' => $newOmitted];
+
+        try {
+            $diff = parent::compareSchemas($oldSchema, $newSchema);
+        } finally {
+            $this->omitted = ['old' => [], 'new' => []];
+        }
+
+        $this->platform->registerRebuildPlan($diff, $this->plan($oldSchema, $newSchema, $diff, $oldOmitted, $newOmitted));
 
         return $diff;
     }
@@ -92,7 +126,10 @@ final class DuckDBComparator extends Comparator
      */
     public function compareTables(Table $oldTable, Table $newTable): TableDiff
     {
-        return parent::compareTables($this->asCreated($oldTable), $this->asCreated($newTable));
+        return parent::compareTables(
+            $this->asCreated($oldTable, $this->omitted['old']),
+            $this->asCreated($newTable, $this->omitted['new']),
+        );
     }
 
     /**
@@ -153,13 +190,33 @@ final class DuckDBComparator extends Comparator
             && AlterRouting::checksEqual($column1, $column2);
     }
 
-    /** @throws Exception */
-    private function plan(Schema $oldSchema, Schema $newSchema, SchemaDiff $diff): RebuildPlan
-    {
-        $oldTables     = self::byKey(array_map($this->asCreated(...), $oldSchema->getTables()));
-        $newTables     = self::byKey(array_map($this->asCreated(...), $newSchema->getTables()));
-        $createdTables = self::byKey($diff->getCreatedTables());
+    /**
+     * @param array<string, true> $oldOmitted The keys the old schema leaves out to break cycles.
+     * @param array<string, true> $newOmitted The keys the new schema leaves out to break cycles.
+     *
+     * @throws Exception
+     */
+    private function plan(
+        Schema $oldSchema,
+        Schema $newSchema,
+        SchemaDiff $diff,
+        array $oldOmitted,
+        array $newOmitted,
+    ): RebuildPlan {
+        $oldTables     = self::byKey(array_map(
+            fn (Table $table): Table => $this->asCreated($table, $oldOmitted),
+            $oldSchema->getTables(),
+        ));
+        $newTables     = self::byKey(array_map(
+            fn (Table $table): Table => $this->asCreated($table, $newOmitted),
+            $newSchema->getTables(),
+        ));
+        $createdTables = [];
         $referencedBy  = [];
+
+        foreach ($diff->getCreatedTables() as $table) {
+            $createdTables[RebuildPlan::tableKey($table->getObjectName())] = $this->asCreated($table, $newOmitted);
+        }
 
         foreach ($oldTables as $key => $table) {
             foreach ($table->getForeignKeys() as $foreignKey) {
@@ -256,7 +313,7 @@ final class DuckDBComparator extends Comparator
             $rebuilds = self::withExpressionIndexes($this->connection, $this->platform, $rebuilds);
         }
 
-        return new RebuildPlan($native, $rebuilds);
+        return new RebuildPlan($native, $rebuilds, $newOmitted, $oldOmitted);
     }
 
     /**
@@ -341,8 +398,9 @@ final class DuckDBComparator extends Comparator
     /**
      * The table as generated DDL creates it and introspection reports it.
      *
-     * Its foreign keys lose those that generated DDL leaves out, while the
-     * indexes that backed them stay, as generated DDL creates them too.
+     * Its foreign keys lose those that generated DDL leaves out, and the given
+     * ones, while the indexes that backed them stay, as generated DDL creates
+     * them too.
      *
      * A composite foreign key whose columns another index lists in a different
      * order takes that index's order, and the index DBAL implicitly added for
@@ -350,15 +408,20 @@ final class DuckDBComparator extends Comparator
      * order of the referenced key, which can differ from the declared order
      * of the index backing it, so introspection reports the key in another
      * order than that index, and DBAL then adds an index the database lacks.
+     *
+     * @param array<string, true> $omitted Keyed by {@see ForeignKeyCycles::identity()}.
      */
-    private function asCreated(Table $table): Table
+    private function asCreated(Table $table, array $omitted): Table
     {
         $foreignKeys     = [];
         $implicitIndexes = [];
         $changed         = false;
 
         foreach ($table->getForeignKeys() as $foreignKey) {
-            if (! $this->platform->createsForeignKey($foreignKey)) {
+            if (
+                ! $this->platform->createsForeignKey($foreignKey)
+                || isset($omitted[ForeignKeyCycles::identity($table->getObjectName(), $foreignKey)])
+            ) {
                 $changed = true;
 
                 continue;

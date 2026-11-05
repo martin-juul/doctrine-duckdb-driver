@@ -8,8 +8,10 @@ use Doctrine\DBAL\Connection;
 use Doctrine\DBAL\Exception\DriverException;
 use Doctrine\DBAL\Platforms\Exception\NotSupported;
 use Doctrine\DBAL\Schema\Column;
+use Doctrine\DBAL\Schema\Comparator;
 use Doctrine\DBAL\Schema\ComparatorConfig;
 use Doctrine\DBAL\Schema\ForeignKeyConstraint;
+use Doctrine\DBAL\Schema\ForeignKeyConstraint\ReferentialAction;
 use Doctrine\DBAL\Schema\Index;
 use Doctrine\DBAL\Schema\PrimaryKeyConstraint;
 use Doctrine\DBAL\Schema\Schema;
@@ -102,6 +104,35 @@ final class SelfReferencingRebuildTest extends FunctionalTestCase
         $this->expectExceptionMessage(RebuildTables::class . '::queue()');
 
         $this->platform()->getAlterSchemaSQL($diff);
+    }
+
+    /**
+     * A self-reference that requests ON DELETE CASCADE is never created, so a
+     * rebuild copies the table in one statement, even from a table diff that
+     * declares the key.
+     */
+    public function testASelfReferenceThatIsLeftOutRebuildsInGeneratedSql(): void
+    {
+        $this->open(false);
+        $this->create(self::category('name', onDelete: ReferentialAction::CASCADE));
+        $this->connection->executeStatement(
+            "INSERT INTO category (id, parent_id, name) VALUES (1, NULL, 'root'), (2, 1, 'child'), (3, 99, 'orphan')",
+        );
+
+        $diff = (new Comparator($this->platform()))->compareTables(
+            self::category('name', onDelete: ReferentialAction::CASCADE),
+            self::category('title', onDelete: ReferentialAction::CASCADE),
+        );
+
+        foreach ($this->platform()->getAlterTableSQL($diff) as $sql) {
+            $this->connection->executeStatement($sql);
+        }
+
+        self::assertSame(
+            [[1, null, 'root'], [2, 1, 'child'], [3, 99, 'orphan']],
+            $this->connection->fetchAllNumeric('SELECT id, parent_id, title FROM category ORDER BY id'),
+        );
+        self::assertSame([], RebuildChecks::foreignKeys($this->connection));
     }
 
     public function testMigrationsDiffFailsNamingTheMigrationHelper(): void
@@ -232,8 +263,11 @@ final class SelfReferencingRebuildTest extends FunctionalTestCase
     }
 
     /** @param non-empty-string $labelColumn */
-    private static function category(string $labelColumn, bool $foreignKey = true): Table
-    {
+    private static function category(
+        string $labelColumn,
+        bool $foreignKey = true,
+        ReferentialAction $onDelete = ReferentialAction::NO_ACTION,
+    ): Table {
         $editor = Table::editor()
             ->setUnquotedName('category')
             ->setColumns(
@@ -253,6 +287,7 @@ final class SelfReferencingRebuildTest extends FunctionalTestCase
                     ->setUnquotedReferencingColumnNames('parent_id')
                     ->setUnquotedReferencedTableName('category')
                     ->setUnquotedReferencedColumnNames('id')
+                    ->setOnDeleteAction($onDelete)
                     ->create(),
             );
         }

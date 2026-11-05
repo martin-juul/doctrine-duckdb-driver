@@ -32,7 +32,6 @@ use Doctrine\DBAL\SQL\Builder\DefaultSelectSQLBuilder;
 use Doctrine\DBAL\SQL\Builder\SelectSQLBuilder;
 use Doctrine\DBAL\TransactionIsolationLevel;
 use Doctrine\DBAL\Types\Types;
-use MartinJuul\DBAL\DuckDB\Exception\ForeignKeyCycle;
 use MartinJuul\DBAL\DuckDB\Schema\DuckDBMetadataProvider;
 use MartinJuul\DBAL\DuckDB\Schema\DuckDBSchemaManager;
 use MartinJuul\DBAL\DuckDB\Schema\RebuildPlan;
@@ -50,10 +49,8 @@ use function array_keys;
 use function array_map;
 use function array_merge;
 use function array_reverse;
-use function array_slice;
 use function array_unique;
 use function array_values;
-use function count;
 use function crc32;
 use function dechex;
 use function explode;
@@ -78,7 +75,9 @@ use function substr;
  *
  * DuckDB 2.0 creates a foreign key only together with its table, so table
  * creation inlines foreign keys and orders tables parents first, and foreign
- * keys cannot be added or dropped later.
+ * keys cannot be added or dropped later. Tables whose foreign keys form a
+ * cycle are created with one key per cycle left out; see
+ * {@see ForeignKeyCycles}.
  *
  * DuckDB 2.0 has no identity columns, so an `autoincrement` column draws its
  * values from a sequence that the platform creates with the table: an owned
@@ -116,6 +115,14 @@ class DuckDBPlatform extends AbstractPlatform
     private array $referencedColumnLists = [];
 
     /**
+     * While a table's CREATE statement is built: the table's name and the
+     * identities of its foreign keys that the statement creates.
+     *
+     * @var array{OptionallyQualifiedName, array<string, true>}|null
+     */
+    private array|null $creatingTableForeignKeys = null;
+
+    /**
      * While a batch of CREATE statements is built: per table of the batch, the
      * column order of its primary key and inline UNIQUE constraints, keyed by
      * column set. Foreign keys to them follow that order.
@@ -146,8 +153,7 @@ class DuckDBPlatform extends AbstractPlatform
 
     /**
      * Returns a copy of this platform whose generated DDL contains no
-     * foreign-key constraints. Cycles are then accepted, because no foreign
-     * key is created.
+     * foreign-key constraints.
      */
     public function withoutForeignKeys(): static
     {
@@ -164,10 +170,11 @@ class DuckDBPlatform extends AbstractPlatform
     }
 
     /**
-     * Whether generated DDL creates the foreign key. DuckDB 2.0 enforces only
-     * NO ACTION and RESTRICT, so a key that requests another ON DELETE or ON
-     * UPDATE action is left out, and with {@see self::withoutForeignKeys()}
-     * every key is.
+     * Whether generated DDL can create the foreign key. DuckDB 2.0 enforces
+     * only NO ACTION and RESTRICT, so a key that requests another ON DELETE or
+     * ON UPDATE action is left out, and with {@see self::withoutForeignKeys()}
+     * every key is. Of the others, a set of tables may still leave keys out
+     * to break cycles; see {@see self::createdForeignKeys()}.
      */
     public function createsForeignKey(ForeignKeyConstraint $foreignKey): bool
     {
@@ -376,10 +383,12 @@ class DuckDBPlatform extends AbstractPlatform
      * Creates the tables parents first, with their foreign keys inline.
      *
      * Foreign keys that DuckDB cannot enforce are left out; see
-     * {@see self::createsForeignKey()}. A cycle among the others fails before
-     * any statement is produced. A composite foreign key lists its column
-     * pairs in the order of the referenced primary key or UNIQUE constraint
-     * when that table is in the batch, because DuckDB requires the same order.
+     * {@see self::createsForeignKey()}. Where the others form cycles between
+     * the tables, one key per cycle is left out; see
+     * {@see self::createdForeignKeys()}. A composite foreign key lists its
+     * column pairs in the order of the referenced primary key or UNIQUE
+     * constraint when that table is in the batch, because DuckDB requires the
+     * same order.
      *
      * @param array<Table> $tables
      *
@@ -387,8 +396,25 @@ class DuckDBPlatform extends AbstractPlatform
      */
     public function getCreateTablesSQL(array $tables): array
     {
+        return $this->createTablesSQL($tables, []);
+    }
+
+    /**
+     * Creates the tables like {@see self::getCreateTablesSQL()}, also leaving
+     * out the given foreign keys: those that a larger set of tables, such as
+     * the target schema of a comparison, leaves out to break cycles.
+     *
+     * @internal
+     *
+     * @param array<Table>        $tables
+     * @param array<string, true> $omittedForeignKeys Keyed by {@see ForeignKeyCycles::identity()}.
+     *
+     * @return list<string>
+     */
+    public function createTablesSQL(array $tables, array $omittedForeignKeys): array
+    {
         $tables      = array_values($tables);
-        $foreignKeys = $this->createdForeignKeys($tables);
+        $foreignKeys = $this->createdForeignKeys($tables, $omittedForeignKeys);
         $tables      = self::sortParentsFirst($tables, $foreignKeys);
         $referenced  = self::collectReferencedColumnLists($tables, $foreignKeys);
         $sql         = [];
@@ -410,8 +436,17 @@ class DuckDBPlatform extends AbstractPlatform
 
         try {
             foreach ($tables as $table) {
-                $this->referencedColumnLists = $referenced[self::tableKey($table->getObjectName())] ?? [];
-                $this->ownedSequenceDefaults = [];
+                $key = self::tableKey($table->getObjectName());
+
+                $identities = [];
+
+                foreach ($foreignKeys[$key] ?? [] as $foreignKey) {
+                    $identities[ForeignKeyCycles::identity($table->getObjectName(), $foreignKey)] = true;
+                }
+
+                $this->referencedColumnLists    = $referenced[$key] ?? [];
+                $this->ownedSequenceDefaults    = [];
+                $this->creatingTableForeignKeys = [$table->getObjectName(), $identities];
 
                 foreach ($table->getColumns() as $position => $column) {
                     if (! $column->getAutoincrement()) {
@@ -428,9 +463,10 @@ class DuckDBPlatform extends AbstractPlatform
                 $sql = array_merge($sql, parent::getCreateTableSQL($table));
             }
         } finally {
-            $this->referencedColumnLists = [];
-            $this->ownedSequenceDefaults = [];
-            $this->keyColumnOrders       = [];
+            $this->referencedColumnLists    = [];
+            $this->ownedSequenceDefaults    = [];
+            $this->keyColumnOrders          = [];
+            $this->creatingTableForeignKeys = null;
         }
 
         return $sql;
@@ -439,8 +475,9 @@ class DuckDBPlatform extends AbstractPlatform
     /**
      * Drops the tables children first, each followed by the owned sequences
      * of its autoincrement columns, which DuckDB refuses to drop while the
-     * table exists. DuckDB cannot drop a foreign key on its own, so no
-     * foreign-key drop statements are produced.
+     * table exists. The order follows the foreign keys that creating the
+     * tables together creates. DuckDB cannot drop a foreign key on its own,
+     * so no foreign-key drop statements are produced.
      *
      * @param array<Table> $tables
      *
@@ -451,7 +488,7 @@ class DuckDBPlatform extends AbstractPlatform
         $tables = array_values($tables);
 
         if (! $this->omitForeignKeys) {
-            $tables = array_reverse(self::sortParentsFirst($tables, $this->createdForeignKeys($tables)));
+            $tables = array_reverse(self::sortParentsFirst($tables, $this->createdForeignKeys($tables, [])));
         }
 
         $sql = [];
@@ -599,6 +636,16 @@ class DuckDBPlatform extends AbstractPlatform
 
         foreach ($options['foreignKeys'] ?? [] as $foreignKey) {
             if (! $this->createsForeignKey($foreignKey)) {
+                continue;
+            }
+
+            if (
+                $this->creatingTableForeignKeys !== null
+                && ! isset($this->creatingTableForeignKeys[1][ForeignKeyCycles::identity(
+                    $this->creatingTableForeignKeys[0],
+                    $foreignKey,
+                )])
+            ) {
                 continue;
             }
 
@@ -963,13 +1010,61 @@ class DuckDBPlatform extends AbstractPlatform
     }
 
     /**
-     * The foreign keys that generated DDL creates, per table.
+     * The foreign keys that creating the tables together creates, per table,
+     * keyed by {@see RebuildPlan::tableKey()}.
      *
-     * @param list<Table> $tables
+     * Keys that {@see self::createsForeignKey()} rejects and the given keys
+     * are left out. Where the others form cycles between the tables, the keys
+     * that {@see self::omittedCycleForeignKeys()} chooses are left out too.
+     *
+     * @internal
+     *
+     * @param array<Table>        $tables
+     * @param array<string, true> $omittedForeignKeys Keyed by {@see ForeignKeyCycles::identity()}.
      *
      * @return array<string, list<ForeignKeyConstraint>>
      */
-    private function createdForeignKeys(array $tables): array
+    public function createdForeignKeys(array $tables, array $omittedForeignKeys = []): array
+    {
+        $tables      = array_values($tables);
+        $foreignKeys = $this->enforceableForeignKeys($tables, $omittedForeignKeys);
+        $cycles      = ForeignKeyCycles::breakingKeys($tables, $foreignKeys);
+
+        if ($cycles === []) {
+            return $foreignKeys;
+        }
+
+        return $this->enforceableForeignKeys($tables, $omittedForeignKeys + $cycles);
+    }
+
+    /**
+     * The foreign keys that creating the tables together leaves out to break
+     * cycles between them, keyed by {@see ForeignKeyCycles::identity()}. Keys
+     * that {@see self::createsForeignKey()} rejects play no part.
+     *
+     * @internal
+     *
+     * @param array<Table> $tables
+     *
+     * @return array<string, true>
+     */
+    public function omittedCycleForeignKeys(array $tables): array
+    {
+        $tables = array_values($tables);
+
+        return ForeignKeyCycles::breakingKeys($tables, $this->enforceableForeignKeys($tables, []));
+    }
+
+    /**
+     * The foreign keys that {@see self::createsForeignKey()} accepts and that
+     * are not given, per table.
+     *
+     * @param list<Table>         $tables
+     * @param array<string, true> $omittedForeignKeys
+     *
+     * @return array<string, list<ForeignKeyConstraint>>
+     */
+    private function enforceableForeignKeys(array $tables, array $omittedForeignKeys): array
     {
         $foreignKeys = [];
 
@@ -979,7 +1074,10 @@ class DuckDBPlatform extends AbstractPlatform
             $foreignKeys[$key] = [];
 
             foreach ($table->getForeignKeys() as $foreignKey) {
-                if (! $this->createsForeignKey($foreignKey)) {
+                if (
+                    ! $this->createsForeignKey($foreignKey)
+                    || isset($omittedForeignKeys[ForeignKeyCycles::identity($table->getObjectName(), $foreignKey)])
+                ) {
                     continue;
                 }
 
@@ -1045,7 +1143,8 @@ class DuckDBPlatform extends AbstractPlatform
      * Self-references and references to tables outside the list are ignored.
      *
      * @param list<Table>                               $tables
-     * @param array<string, list<ForeignKeyConstraint>> $foreignKeys The foreign keys to follow, per table.
+     * @param array<string, list<ForeignKeyConstraint>> $foreignKeys The foreign keys to follow, per table. They form
+     *                                                               no cycle between tables.
      *
      * @return list<Table>
      */
@@ -1057,12 +1156,11 @@ class DuckDBPlatform extends AbstractPlatform
             $byKey[self::tableKey($table->getObjectName())] = $table;
         }
 
-        $state  = [];
-        $path   = [];
-        $sorted = [];
+        $visited = [];
+        $sorted  = [];
 
         foreach (array_keys($byKey) as $key) {
-            self::visit($key, $byKey, $foreignKeys, $state, $path, $sorted);
+            self::visit($key, $byKey, $foreignKeys, $visited, $sorted);
         }
 
         return $sorted;
@@ -1071,37 +1169,21 @@ class DuckDBPlatform extends AbstractPlatform
     /**
      * @param array<string, Table>                      $byKey
      * @param array<string, list<ForeignKeyConstraint>> $foreignKeys
-     * @param array<string, int|true>                   $state       The table's position in $path while it is
-     *                                                               visited, true once sorted.
-     * @param list<string>                              $path        The tables being visited, outermost first.
+     * @param array<string, true>                       $visited
      * @param list<Table>                               $sorted
      */
     private static function visit(
         string $key,
         array $byKey,
         array $foreignKeys,
-        array &$state,
-        array &$path,
+        array &$visited,
         array &$sorted,
     ): void {
-        $position = $state[$key] ?? null;
-
-        if ($position === true) {
+        if (isset($visited[$key])) {
             return;
         }
 
-        if ($position !== null) {
-            $tables = [$byKey[$key]->getObjectName()->toString()];
-
-            foreach (array_slice($path, $position + 1) as $member) {
-                $tables[] = $byKey[$member]->getObjectName()->toString();
-            }
-
-            throw ForeignKeyCycle::new($tables);
-        }
-
-        $state[$key] = count($path);
-        $path[]      = $key;
+        $visited[$key] = true;
 
         foreach ($foreignKeys[$key] ?? [] as $foreignKey) {
             $referenced = self::tableKey($foreignKey->getReferencedTableName());
@@ -1110,12 +1192,10 @@ class DuckDBPlatform extends AbstractPlatform
                 continue;
             }
 
-            self::visit($referenced, $byKey, $foreignKeys, $state, $path, $sorted);
+            self::visit($referenced, $byKey, $foreignKeys, $visited, $sorted);
         }
 
-        $path        = array_slice($path, 0, -1);
-        $state[$key] = true;
-        $sorted[]    = $byKey[$key];
+        $sorted[] = $byKey[$key];
     }
 
     /**

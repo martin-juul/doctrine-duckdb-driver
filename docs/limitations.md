@@ -120,7 +120,7 @@ DuckDB rewrites a sequence's `START WITH` as values are drawn, so introspection 
 
 ### Keys with a referential action are left out
 
-DuckDB 2.0 enforces only `NO ACTION` and `RESTRICT`. A foreign key that requests `CASCADE`, `SET NULL` or `SET DEFAULT` for `ON DELETE` or `ON UPDATE` is left out of generated DDL; every other foreign key is created. The index on the key's columns is still created. Schema comparison ignores the left-out keys, so `doctrine:schema:validate` and `migrations:diff` report no change for them, and they cause no rebuilds and no [cycle](#no-cycles-between-tables) errors.
+DuckDB 2.0 enforces only `NO ACTION` and `RESTRICT`. A foreign key that requests `CASCADE`, `SET NULL` or `SET DEFAULT` for `ON DELETE` or `ON UPDATE` is left out of generated DDL; every other foreign key is created. The index on the key's columns is still created. Schema comparison ignores the left-out keys, so `doctrine:schema:validate` and `migrations:diff` report no change for them, and they cause no rebuilds and take no part in [cycles](#cycles-between-tables-lose-one-key).
 
 The relations behind these keys are application-enforced: DuckDB neither checks them nor applies the action. Deleting a parent row leaves its child rows in place, still holding the parent's key.
 
@@ -130,11 +130,23 @@ ORM declares such keys in three places:
 - **JOINED inheritance.** ORM declares `ON DELETE CASCADE` from every subclass table to the root table, and on removal deletes only the root row. The package's `MartinJuul\DBAL\DuckDB\ORM\JoinedSubclassRowsListener` deletes the entity's subclass-table rows in the same flush transaction. The Symfony bundle registers it; without Symfony, register it with `DuckDBSetup::registerListeners()` (see [setup](setup.md#orm)). Without the listener, removed entities leave rows in their subclass tables. DQL `DELETE` queries on a JOINED class already delete from every table.
 - **Many-to-many associations with default join columns.** ORM declares `ON DELETE CASCADE` on both join columns, and when an owning-side entity is removed it does not delete the entity's join-table rows, because it relies on the cascade. Those rows stay behind. Clear the collection and flush before removing the entity, or declare the join columns with `#[JoinTable]` without `onDelete`, which makes ORM delete the rows itself; such keys are created and checked.
 
-### No cycles between tables
+### Cycles between tables lose one key
 
-DuckDB creates a foreign key only together with its table, and only when the referenced table already exists, so tables whose foreign keys reference each other cannot be created. Schema generation fails before any SQL runs with `MartinJuul\DBAL\DuckDB\Exception\ForeignKeyCycle`, naming the tables in the cycle. A table that references itself is fine, and keys [left out for their referential action](#keys-with-a-referential-action-are-left-out) do not count.
+DuckDB creates a foreign key only together with its table, and only when the referenced table already exists, so it cannot create tables whose foreign keys reference each other in a cycle. Generated DDL leaves out one foreign key per cycle and creates the others, with the tables in dependency order. The index on the left-out key's columns is still created. A table that references itself forms no cycle, and keys [left out for their referential action](#keys-with-a-referential-action-are-left-out) take no part.
 
-Workaround: remove one of the foreign keys from the cycle. In ORM, replace one of the associations with a plain column that holds the other entity's ID. Or omit foreign keys for the connection (see below).
+The left-out key is chosen from the whole schema, the same way every time:
+
+1. the key that lies on the most cycles goes first, so a key that overlapping cycles share breaks them all;
+2. then a key whose columns all accept `NULL`;
+3. then the key whose table name, then column names, sort first.
+
+For example, with ORM entities `User` and `Post` where the nullable `User::$lastPost` references a post and the required `Post::$author` references a user, the key on `user.last_post_id` is left out and the key on `post.author_id` is created and checked.
+
+The relation behind a left-out key is application-enforced: DuckDB accepts any value in its columns, including the ID of a row that does not exist. Schema comparison ignores the left-out keys, so `doctrine:schema:validate`, `doctrine:schema:update` and `migrations:diff` report no change for them, and they cause no rebuilds. Adding a key or table that changes which key a cycle loses rebuilds the affected tables.
+
+Updating the columns of a left-out key on a row that other rows reference fails with DuckDB's [early check](#duckdb-checks-foreign-keys-early), because ORM indexes its join columns. In the example, ORM saves a new user with `lastPost` set by inserting the user with `NULL` and updating `last_post_id` after inserting the post, which fails once the post references the user.
+
+Only schema comparison sees the whole schema. Comparing a single table of a cycle with the comparator's `compareTables()` proposes adding the left-out key, and applying that diff fails when the rebuild drops the table, because the cycle's other table references it. ORM's schema tool and validator, Doctrine Migrations and DBAL's schema manager compare whole schemas.
 
 The same rule means a foreign key cannot be added to or dropped from an existing table. Schema diffs handle this by rebuilding the table (see [table rebuilds](#schema-changes-and-table-rebuilds)).
 
@@ -151,21 +163,21 @@ DuckDB 2.0 does not support foreign keys that reference a table in another schem
 DuckDB checks a foreign key when each statement runs, against the state before the statement, rather than at the end of the statement or transaction. Valid sequences of statements then fail:
 
 - within one transaction, deleting a child row and then its parent fails, because DuckDB does not yet see the child as deleted;
-- an `UPDATE` that sets any primary-key or unique column of a referenced row fails, even under autocommit and even when the value does not change (`SET id = id`). DuckDB runs such an update as a delete and an insert.
+- an `UPDATE` that sets any indexed column of a referenced row fails, even under autocommit and even when the value does not change (`SET id = id`). DuckDB runs such an update as a delete and an insert. This covers primary-key and unique columns and any column with an index, such as an ORM join column.
 
-ORM runs into the first case when one `flush()` removes a child and its parent, for example through `cascade: ['remove']`, and into the second when an entity that other rows reference has a changed unique column.
+ORM runs into the first case when one `flush()` removes a child and its parent, for example through `cascade: ['remove']`, and into the second when an entity that other rows reference has a changed unique column or association.
 
 The driver raises `MartinJuul\DBAL\DuckDB\Exception\EarlyForeignKeyCheckViolation`, a subclass of `ForeignKeyConstraintViolationException`. DuckDB reports a real violation and an early-check rejection with the same message, so the exception cannot tell them apart. Its message says the row may still be referenced, or DuckDB's early check may have rejected a valid sequence of statements, and points to "Over-eager constraint checking in foreign keys" in DuckDB's documentation on indexes. Check for a real reference before you assume the early check.
 
 Workarounds:
 
 - delete children and parents in separate transactions (for ORM, separate flushes outside a surrounding transaction);
-- do not update unique or primary-key columns of rows that other rows reference; give such tables a surrogate key that never changes;
+- do not update indexed columns of rows that other rows reference; give such tables a surrogate key that never changes;
 - omit foreign-key constraints for the connection (below).
 
 ### Omitting foreign keys
 
-`DuckDBSetup::omitForeignKeys()` or the bundle's `duckdb.omit_foreign_keys` option leaves foreign-key constraints out of generated DDL for a connection. Schema comparison then ignores foreign keys and introspection reports none. This removes the early-check failures, the cycle restriction and the rebuilds that foreign-key changes cause. Referential integrity becomes the application's job. See [setup](setup.md#omitting-foreign-keys).
+`DuckDBSetup::omitForeignKeys()` or the bundle's `duckdb.omit_foreign_keys` option leaves foreign-key constraints out of generated DDL for a connection. Schema comparison then ignores foreign keys and introspection reports none. This removes the early-check failures, the keys left out of cycles and the rebuilds that foreign-key changes cause. Referential integrity becomes the application's job. See [setup](setup.md#omitting-foreign-keys).
 
 ## Schema changes and table rebuilds
 
